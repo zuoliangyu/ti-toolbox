@@ -1,0 +1,21 @@
+[workspace]
+members = ["converter-core"]
+
+[package]
+name = "ccs2keil"
+version = "0.1.0"
+description = "MSPM0 CCS 与 Keil 工程转换器"
+authors = ["CCS2KEIL contributors"]
+edition = "2021"
+
+[lib]
+name = "ccs2keil_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ccs2keil-core = { path = "converter-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
