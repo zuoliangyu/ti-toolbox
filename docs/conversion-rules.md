@@ -37,6 +37,8 @@
 
 - CCS 与 Keil 安装目录会按用户设置的层级向下搜索；层级范围为 `0–4`，默认 `2`，并优先使用层级最浅的匹配项。
 - 构建期间在界面底部实时追加日志；失败时直接展示日志末尾 18 行，结束后在验证结果中保留完整日志。
+- IDE 仅在对应构建验证时需要；未执行验证时允许用户确认风险后转换，已有失败结果时拒绝继续转换。
+- 目标 IDE 缺失时保留转换结果，并标记为“未执行目标构建验证”。
 
 ### CCS
 
@@ -60,3 +62,12 @@
 - 先写入同级临时目录，全部成功后再替换为空的目标目录。
 - Pack 不支持目标器件或 SDK 缺少官方模板时停止转换。
 - 启动文件、链接脚本和目标工具链库只从用户指定的 SDK/Pack 派生，不做文本级猜测转换。
+
+## 环境发现与 Keil SysConfig
+
+- CCS → Keil 需要 SDK 和 Pack 元数据；CCS 只负责源构建验证，Keil 只负责目标构建验证。
+- Keil → CCS 只强制要求 SDK，Pack 不参与 ProjectSpec 生成。
+- 已安装 Pack 只从 `ARM/PACK/TexasInstruments` 识别；`.Web` PDSC 可提供 PackID 和官方下载链接，但不视为已安装。
+- 不自动下载 Pack，也不调用 Pack Installer。
+- 配置 Keil SysConfig 前必须由用户确认；工具更新 SDK 的 `syscfg.bat` 和 `MSPM0_SDK_syscfg_menu_import.cfg`，并为首次修改保留 `.ccs2keil.bak`。
+- Keil Tools 配置优先复用命令相同的现有项；否则更新 CCS2KEIL 自有项或使用首个空闲槽位，不覆盖其他工具。

@@ -1,25 +1,32 @@
 use ccs2keil_core::{
-    BuildValidationReport, ConversionReport, ConversionRequest, ProjectInspection,
-    ValidatedResources,
+    BuildValidationReport, ConversionReport, ConversionRequest, EnvironmentDiscovery,
+    EnvironmentRequest, KeilSysConfigRequest, KeilSysConfigResult, ProjectInspection,
 };
-use std::path::Path;
+use std::{path::Path, process::Command};
 use tauri::Emitter;
 
 #[tauri::command]
-fn validate_resources(
-    sdk_path: String,
-    pack_path: String,
-    ccs_path: String,
-    keil_path: String,
-    search_depth: u8,
-) -> Result<ValidatedResources, String> {
-    ccs2keil_core::validate_development_resources(
-        Path::new(&sdk_path),
-        Path::new(&pack_path),
-        Path::new(&ccs_path),
-        Path::new(&keil_path),
-        search_depth,
-    )
+async fn discover_environment(request: EnvironmentRequest) -> Result<EnvironmentDiscovery, String> {
+    tauri::async_runtime::spawn_blocking(move || ccs2keil_core::discover_environment(&request))
+        .await
+        .map_err(|error| format!("环境自动检测任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+fn configure_keil_sysconfig(request: KeilSysConfigRequest) -> Result<KeilSysConfigResult, String> {
+    ccs2keil_core::configure_keil_sysconfig(&request)
+}
+
+#[tauri::command]
+fn open_pack_download(url: String) -> Result<(), String> {
+    if !url.starts_with("https://www.keil.arm.com/packs/") {
+        return Err("只允许打开 Keil 官方 Pack 页面".into());
+    }
+    Command::new("rundll32.exe")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法打开 Pack 下载页面：{error}"))
 }
 
 #[tauri::command]
@@ -68,7 +75,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            validate_resources,
+            discover_environment,
+            configure_keil_sysconfig,
+            open_pack_download,
             inspect_project,
             convert_project,
             validate_project_build,

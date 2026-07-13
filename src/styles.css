@@ -144,6 +144,8 @@ button:hover:not(:disabled) { border-color: #96add0; background: #f6f9fd; transf
 .inline-result { display: flex; align-items: flex-start; min-width: 0; gap: 8px; padding: 9px 11px; }
 .inline-result > span { width: 6px; height: 6px; flex: 0 0 auto; margin-top: 4px; border-radius: 50%; background: currentColor; }
 .inline-result p { min-width: 0; margin: 0; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-line; }
+.resource-result p { flex: 1; }
+.resource-result button { flex: 0 0 auto; }
 .muted, .inspection.empty { color: #7d8999; background: #f5f7fa; }
 .success { color: #16836c; background: #eaf8f4; }
 .error { color: #b23b4c; background: #fff0f2; }

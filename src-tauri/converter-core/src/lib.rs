@@ -90,6 +90,68 @@ pub struct ValidatedResources {
     pub keil_executable: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentRequest {
+    pub project_path: String,
+    pub sdk_path: String,
+    pub pack_path: String,
+    pub ccs_path: String,
+    pub keil_path: String,
+    pub sysconfig_path: String,
+    pub search_depth: u8,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentDiscovery {
+    pub project_kind: ProjectKind,
+    pub device: String,
+    pub sdk_path: Option<String>,
+    pub sdk_version: Option<String>,
+    pub pack_path: Option<String>,
+    pub pack_name: Option<String>,
+    pub pack_version: Option<String>,
+    pub pack_installed: bool,
+    pub pack_download_url: Option<String>,
+    pub ccs_path: Option<String>,
+    pub ccs_executable: Option<String>,
+    pub keil_path: Option<String>,
+    pub keil_executable: Option<String>,
+    pub sysconfig_path: Option<String>,
+    pub sysconfig_executable: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeilSysConfigRequest {
+    pub sdk_path: String,
+    pub keil_path: String,
+    pub sysconfig_path: String,
+    pub search_depth: u8,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeilSysConfigResult {
+    pub changed: bool,
+    pub slot: u8,
+    pub title: String,
+    pub executable: String,
+    pub working_directory: String,
+    pub arguments: String,
+    pub updated_files: Vec<String>,
+    pub backup_files: Vec<String>,
+}
+
+struct PackCandidate {
+    path: PathBuf,
+    name: String,
+    version: String,
+    installed: bool,
+}
+
 struct CommandResult {
     status: ExitStatus,
     log: String,
@@ -117,6 +179,617 @@ pub fn validate_development_resources(
         ccs_executable: ccs.to_string_lossy().into_owned(),
         keil_executable: keil.to_string_lossy().into_owned(),
     })
+}
+
+pub fn discover_environment(request: &EnvironmentRequest) -> Result<EnvironmentDiscovery, String> {
+    if request.search_depth > 4 {
+        return Err("工具目录搜索层级只能是 0–4".into());
+    }
+    let inspection = inspect_project(Path::new(&request.project_path))?;
+    let mut warnings = Vec::new();
+
+    let sdk = discover_sdk(&request.sdk_path);
+    let sdk_version = sdk.as_ref().and_then(|path| validate_sdk(path).ok());
+    if sdk.is_none() {
+        warnings.push("未找到 MSPM0 SDK；转换前需要手动选择".into());
+    }
+
+    let ccs = discover_ccs(&request.ccs_path, request.search_depth);
+    if ccs.is_none() {
+        warnings.push(if inspection.kind == ProjectKind::Ccs {
+            "未找到 CCS；仍可转换，但不能执行源工程构建验证".into()
+        } else {
+            "未找到 CCS；仍可生成目标工程，但不能执行目标构建验证".into()
+        });
+    }
+    let keil = discover_keil(&request.keil_path, request.search_depth);
+    if keil.is_none() {
+        warnings.push(if inspection.kind == ProjectKind::Keil {
+            "未找到 Keil；仍可转换，但不能执行源工程构建验证".into()
+        } else {
+            "未找到 Keil；仍可生成目标工程，但不能执行目标构建验证".into()
+        });
+    }
+
+    let pack = if inspection.kind == ProjectKind::Ccs {
+        discover_pack(&request.pack_path, keil.as_deref(), &inspection.device)
+    } else {
+        None
+    };
+    if inspection.kind == ProjectKind::Ccs && pack.is_none() {
+        warnings.push(format!(
+            "未找到支持 {} 的 Pack；请从 Keil 官网下载后手动选择",
+            inspection.device
+        ));
+    }
+    let pack_download_url = pack
+        .as_ref()
+        .map(|value| pack_download_url(&value.name))
+        .or_else(|| {
+            (inspection.kind == ProjectKind::Ccs)
+                .then(|| format!("https://www.keil.arm.com/packs/?q={}", inspection.device))
+        });
+
+    let sysconfig = discover_sysconfig(&request.sysconfig_path, ccs.as_deref());
+    if sysconfig.is_none() {
+        warnings
+            .push("未找到 SysConfig；已有生成文件不受影响，但无法一键配置 Keil SysConfig".into());
+    }
+
+    let keil_root = keil
+        .as_ref()
+        .and_then(|path| path.parent().and_then(Path::parent).map(Path::to_path_buf));
+    let ccs_root = ccs
+        .as_ref()
+        .and_then(|path| path.parent().and_then(Path::parent).map(Path::to_path_buf));
+    Ok(EnvironmentDiscovery {
+        project_kind: inspection.kind,
+        device: inspection.device,
+        sdk_path: sdk.as_ref().map(|path| path_text(path)),
+        sdk_version,
+        pack_path: pack.as_ref().map(|value| path_text(&value.path)),
+        pack_name: pack.as_ref().map(|value| value.name.clone()),
+        pack_version: pack.as_ref().map(|value| value.version.clone()),
+        pack_installed: pack.as_ref().is_some_and(|value| value.installed),
+        pack_download_url,
+        ccs_path: ccs_root.as_ref().map(|path| path_text(path)),
+        ccs_executable: ccs.as_ref().map(|path| path_text(path)),
+        keil_path: keil_root.as_ref().map(|path| path_text(path)),
+        keil_executable: keil.as_ref().map(|path| path_text(path)),
+        sysconfig_path: sysconfig.as_ref().map(|path| path_text(path)),
+        sysconfig_executable: sysconfig
+            .as_ref()
+            .map(|path| path_text(&sysconfig_nw_executable(path))),
+        warnings,
+    })
+}
+
+fn discover_sdk(selected: &str) -> Option<PathBuf> {
+    if !selected.is_empty() {
+        let path = PathBuf::from(selected);
+        if validate_sdk(&path).is_ok() {
+            return Some(path);
+        }
+    }
+    let mut candidates = Vec::new();
+    for root in [Path::new(r"C:\ti"), Path::new(r"D:\ti")] {
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if let Ok(version) = validate_sdk(&path) {
+                candidates.push((version_key(&version), path));
+            }
+        }
+    }
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    candidates.pop().map(|value| value.1)
+}
+
+fn discover_ccs(selected: &str, depth: u8) -> Option<PathBuf> {
+    if !selected.is_empty() {
+        if let Ok(path) = locate_ccs_server(Path::new(selected), depth) {
+            return Some(path);
+        }
+    }
+    [Path::new(r"C:\ti"), Path::new(r"D:\ti")]
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .find_map(|path| locate_ccs_server(path, 4).ok())
+}
+
+fn discover_keil(selected: &str, depth: u8) -> Option<PathBuf> {
+    if !selected.is_empty() {
+        if let Ok(path) = locate_uv4(Path::new(selected), depth) {
+            return Some(path);
+        }
+    }
+    let registry_path =
+        query_registry_string(r"HKLM\SOFTWARE\WOW6432Node\Keil\Products\MDK", "Path")
+            .or_else(|| query_registry_string(r"HKLM\SOFTWARE\Keil\Products\MDK", "Path"));
+    registry_path
+        .as_deref()
+        .and_then(|path| Path::new(path).parent())
+        .and_then(|path| locate_uv4(path, depth).ok())
+        .or_else(|| {
+            [Path::new(r"C:\Keil_v5"), Path::new(r"D:\Keil_v5")]
+                .into_iter()
+                .find_map(|path| locate_uv4(path, depth).ok())
+        })
+}
+
+fn discover_pack(
+    selected: &str,
+    keil_executable: Option<&Path>,
+    device: &str,
+) -> Option<PackCandidate> {
+    let selected = if !selected.is_empty() {
+        let path = PathBuf::from(selected);
+        if let Ok((name, version, devices)) = validate_pack(&path) {
+            if devices.iter().any(|value| value == device) {
+                Some(PackCandidate {
+                    installed: is_installed_pack_path(&path),
+                    path,
+                    name,
+                    version,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if selected.as_ref().is_some_and(|value| value.installed) {
+        return selected;
+    }
+    let pack_root = keil_executable
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|path| path.join("ARM").join("PACK"));
+    pack_root
+        .as_ref()
+        .and_then(|root| find_pack_candidate(&root.join("TexasInstruments"), device, true, 4))
+        .or(selected)
+        .or_else(|| {
+            pack_root
+                .as_ref()
+                .and_then(|root| find_pack_candidate(&root.join(".Web"), device, false, 1))
+        })
+}
+
+fn find_pack_candidate(
+    root: &Path,
+    device: &str,
+    installed: bool,
+    depth: usize,
+) -> Option<PackCandidate> {
+    fn visit(
+        root: &Path,
+        device: &str,
+        installed: bool,
+        depth: usize,
+        candidates: &mut Vec<PackCandidate>,
+    ) {
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            if path.is_dir() && depth > 0 {
+                visit(&path, device, installed, depth - 1, candidates);
+                continue;
+            }
+            if path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_none_or(|value| !value.eq_ignore_ascii_case("pdsc"))
+            {
+                continue;
+            }
+            let Ok((name, version, devices)) = validate_pack(&path) else {
+                continue;
+            };
+            if devices.iter().any(|value| value == device) {
+                candidates.push(PackCandidate {
+                    path: if installed {
+                        path.parent().unwrap_or(root).to_path_buf()
+                    } else {
+                        path
+                    },
+                    name,
+                    version,
+                    installed,
+                });
+            }
+        }
+    }
+
+    let mut candidates = Vec::new();
+    visit(root, device, installed, depth, &mut candidates);
+    candidates.sort_by_key(|value| version_key(&value.version));
+    candidates.pop()
+}
+
+fn is_installed_pack_path(path: &Path) -> bool {
+    let text = path.to_string_lossy().to_ascii_lowercase();
+    text.contains(r"\arm\pack\") && !text.contains(r"\pack\.")
+}
+
+fn pack_download_url(name: &str) -> String {
+    format!(
+        "https://www.keil.arm.com/packs/{}-texasinstruments/boards/",
+        name.to_ascii_lowercase()
+    )
+}
+
+fn discover_sysconfig(selected: &str, ccs_executable: Option<&Path>) -> Option<PathBuf> {
+    if !selected.is_empty() {
+        if let Some(path) = normalize_sysconfig_path(Path::new(selected)) {
+            return Some(path);
+        }
+    }
+    let mut roots = Vec::new();
+    if let Some(ccs) = ccs_executable {
+        if let Some(root) = ccs.parent().and_then(Path::parent).and_then(Path::parent) {
+            roots.push(root.to_path_buf());
+        }
+    }
+    roots.extend([PathBuf::from(r"C:\ti"), PathBuf::from(r"D:\ti")]);
+    let mut candidates = Vec::new();
+    for root in roots {
+        collect_sysconfig_paths(&root, 2, &mut candidates);
+    }
+    candidates.sort_by_key(|path| {
+        version_key(
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default(),
+        )
+    });
+    candidates.pop()
+}
+
+fn normalize_sysconfig_path(path: &Path) -> Option<PathBuf> {
+    if path.is_file()
+        && path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("nw.exe"))
+    {
+        let root = path.parent()?.parent()?;
+        return root
+            .join("sysconfig_cli.bat")
+            .is_file()
+            .then(|| root.to_path_buf());
+    }
+    if sysconfig_nw_executable(path).is_file() && path.join("sysconfig_cli.bat").is_file() {
+        return Some(path.to_path_buf());
+    }
+    if path.join("nw.exe").is_file() {
+        let root = path.parent()?;
+        return root
+            .join("sysconfig_cli.bat")
+            .is_file()
+            .then(|| root.to_path_buf());
+    }
+    None
+}
+
+fn collect_sysconfig_paths(root: &Path, depth: usize, candidates: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.starts_with("sysconfig_"))
+            && sysconfig_nw_executable(&path).is_file()
+            && path.join("sysconfig_cli.bat").is_file()
+        {
+            candidates.push(path);
+        } else if depth > 0 {
+            collect_sysconfig_paths(&path, depth - 1, candidates);
+        }
+    }
+}
+
+fn query_registry_string(key: &str, value: &str) -> Option<String> {
+    let output = Command::new("reg")
+        .args(["query", key, "/v", value])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix(value)?.trim_start();
+            rest.strip_prefix("REG_SZ")
+                .map(|value| value.trim().to_string())
+        })
+}
+
+fn version_key(value: &str) -> Vec<u32> {
+    value
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse().ok())
+        .collect()
+}
+
+fn path_text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn sysconfig_nw_executable(root: &Path) -> PathBuf {
+    root.join("nw").join("nw.exe")
+}
+
+pub fn configure_keil_sysconfig(
+    request: &KeilSysConfigRequest,
+) -> Result<KeilSysConfigResult, String> {
+    if request.search_depth > 4 {
+        return Err("工具目录搜索层级只能是 0–4".into());
+    }
+    let sdk = Path::new(&request.sdk_path);
+    let sdk_version = validate_sdk(sdk)?;
+    locate_uv4(Path::new(&request.keil_path), request.search_depth)?;
+    let sysconfig = normalize_sysconfig_path(Path::new(&request.sysconfig_path))
+        .ok_or("SysConfig 路径无效：未找到 nw/nw.exe")?;
+    let executable = sysconfig_nw_executable(&sysconfig);
+    let command = format!("\"{}\" \"{}\"", executable.display(), sysconfig.display());
+    let working_directory = path_text(sdk);
+    let arguments = "--compiler keil -s \".metadata\\product.json\" \"#E\"".to_string();
+    let title = format!("CCS2KEIL SysConfig - SDK {sdk_version}");
+    let key = keil_tool_registry_key()
+        .ok_or("未找到 Keil 用户配置；请先启动一次 Keil µVision，再重新执行一键配置")?;
+    let registry = query_registry_key(&key)?;
+    let (slot, equivalent) =
+        choose_keil_tool_slot(&registry, &command).ok_or("Keil Tools 菜单没有可用配置槽位")?;
+    let (updated_files, backup_files) =
+        update_sdk_keil_sysconfig_files(sdk, &sdk_version, &sysconfig)?;
+    if equivalent {
+        return Ok(KeilSysConfigResult {
+            changed: !updated_files.is_empty(),
+            slot,
+            title: "已存在等效 SysConfig 工具".into(),
+            executable: path_text(&executable),
+            working_directory,
+            arguments,
+            updated_files,
+            backup_files,
+        });
+    }
+
+    add_registry_value(&key, &format!("Mfg{slot}"), "REG_DWORD", "2304")?;
+    add_registry_value(&key, &format!("Mid{slot}"), "REG_SZ", &working_directory)?;
+    add_registry_value(&key, &format!("Mex{slot}"), "REG_SZ", &command)?;
+    add_registry_value(&key, &format!("Mag{slot}"), "REG_SZ", &arguments)?;
+    add_registry_value(&key, &format!("Mtx{slot}"), "REG_SZ", &title)?;
+    Ok(KeilSysConfigResult {
+        changed: true,
+        slot,
+        title,
+        executable: path_text(&executable),
+        working_directory,
+        arguments,
+        updated_files,
+        backup_files,
+    })
+}
+
+fn update_sdk_keil_sysconfig_files(
+    sdk: &Path,
+    sdk_version: &str,
+    sysconfig: &Path,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let keil = sdk.join("tools").join("keil");
+    let bat_path = keil.join("syscfg.bat");
+    let cfg_path = keil.join("MSPM0_SDK_syscfg_menu_import.cfg");
+    let bat = fs::read_to_string(&bat_path)
+        .map_err(|error| format!("无法读取 {}：{error}", bat_path.display()))?;
+    let cfg = fs::read_to_string(&cfg_path)
+        .map_err(|error| format!("无法读取 {}：{error}", cfg_path.display()))?;
+    let (updated_bat, updated_cfg) =
+        render_keil_sysconfig_files(&bat, &cfg, sdk, sdk_version, sysconfig)?;
+    let mut updated_files = Vec::new();
+    let mut backup_files = Vec::new();
+    for (path, current, updated) in [
+        (&bat_path, bat.as_str(), updated_bat.as_str()),
+        (&cfg_path, cfg.as_str(), updated_cfg.as_str()),
+    ] {
+        if current == updated {
+            continue;
+        }
+        let backup = path.with_file_name(format!(
+            "{}.ccs2keil.bak",
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("config")
+        ));
+        if !backup.exists() {
+            fs::copy(path, &backup)
+                .map_err(|error| format!("无法备份 {}：{error}", path.display()))?;
+            backup_files.push(path_text(&backup));
+        }
+        fs::write(path, updated)
+            .map_err(|error| format!("无法更新 {}：{error}", path.display()))?;
+        updated_files.push(path_text(path));
+    }
+    Ok((updated_files, backup_files))
+}
+
+fn render_keil_sysconfig_files(
+    bat: &str,
+    cfg: &str,
+    sdk: &Path,
+    sdk_version: &str,
+    sysconfig: &Path,
+) -> Result<(String, String), String> {
+    let sysconfig_version = sysconfig
+        .file_name()
+        .and_then(|value| value.to_str())
+        .and_then(|value| value.strip_prefix("sysconfig_"))
+        .unwrap_or("custom");
+    let bat = replace_config_line(
+        bat,
+        "set SYSCFG_PATH=",
+        &format!(
+            "set SYSCFG_PATH=\"{}\"",
+            sysconfig.join("sysconfig_cli.bat").display()
+        ),
+    )?;
+    let cfg = replace_config_line(
+        cfg,
+        "[",
+        &format!(
+            "[Sysconfig v{sysconfig_version} - MSPM0 SDK v{}]",
+            sdk_version.replace('.', "_")
+        ),
+    )?;
+    let cfg = replace_config_line(
+        &cfg,
+        "Command=",
+        &format!(
+            "Command=\"{}\" \"{}\"",
+            sysconfig_nw_executable(sysconfig).display(),
+            sysconfig.display()
+        ),
+    )?;
+    let cfg = replace_config_line(
+        &cfg,
+        "Initial Folder=",
+        &format!("Initial Folder={}", sdk.display()),
+    )?;
+    Ok((bat, cfg))
+}
+
+fn replace_config_line(content: &str, prefix: &str, replacement: &str) -> Result<String, String> {
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut found = false;
+    let mut lines = content
+        .lines()
+        .map(|line| {
+            if !found && line.trim_start().starts_with(prefix) {
+                found = true;
+                replacement
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(newline);
+    if !found {
+        return Err(format!("配置文件缺少 {prefix} 配置项"));
+    }
+    if content.ends_with('\n') {
+        lines.push_str(newline);
+    }
+    Ok(lines)
+}
+
+fn keil_tool_registry_key() -> Option<String> {
+    ["礦ision5", "µVision5", "UVision5"]
+        .into_iter()
+        .map(|name| format!(r"HKCU\Software\Keil\{name}"))
+        .find(|parent| {
+            Command::new("reg")
+                .args(["query", parent])
+                .output()
+                .is_ok_and(|output| output.status.success())
+        })
+        .map(|parent| format!(r"{parent}\ToolM"))
+}
+
+fn query_registry_key(key: &str) -> Result<String, String> {
+    let output = Command::new("reg")
+        .args(["query", key])
+        .output()
+        .map_err(|error| format!("无法读取 Keil Tools 配置：{error}"))?;
+    Ok(output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default())
+}
+
+fn choose_keil_tool_slot(registry: &str, command: &str) -> Option<(u8, bool)> {
+    let mut occupied = BTreeSet::new();
+    let mut own_slot = None;
+    let expected = normalize_registry_command(command);
+    for line in registry.lines() {
+        let line = line.trim();
+        let Some((name, value)) = parse_registry_string_line(line) else {
+            if let Some(name) = line.split_whitespace().next() {
+                if let Some(slot) = tool_value_slot(name) {
+                    occupied.insert(slot);
+                }
+            }
+            continue;
+        };
+        let Some(slot) = tool_value_slot(name) else {
+            continue;
+        };
+        occupied.insert(slot);
+        if name.starts_with("Mex") && normalize_registry_command(value) == expected {
+            return Some((slot, true));
+        }
+        if name.starts_with("Mtx") && value.starts_with("CCS2KEIL SysConfig") {
+            own_slot = Some(slot);
+        }
+    }
+    own_slot.map(|slot| (slot, false)).or_else(|| {
+        (0..=u8::MAX)
+            .find(|slot| !occupied.contains(slot))
+            .map(|slot| (slot, false))
+    })
+}
+
+fn parse_registry_string_line(line: &str) -> Option<(&str, &str)> {
+    let (name, rest) = line.split_once("REG_SZ")?;
+    Some((name.trim(), rest.trim()))
+}
+
+fn tool_value_slot(name: &str) -> Option<u8> {
+    ["Mfg", "Mtx", "Mid", "Mex", "Mag"]
+        .into_iter()
+        .find_map(|prefix| name.strip_prefix(prefix)?.parse().ok())
+}
+
+fn normalize_registry_command(value: &str) -> String {
+    value
+        .replace('"', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn add_registry_value(key: &str, name: &str, kind: &str, value: &str) -> Result<(), String> {
+    let output = Command::new("reg")
+        .args(["add", key, "/v", name, "/t", kind, "/d", value, "/f"])
+        .output()
+        .map_err(|error| format!("无法写入 Keil Tools 配置：{error}"))?;
+    output
+        .status
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("写入 Keil Tools 配置项 {name} 失败"))
 }
 
 pub fn validate_project_build(
@@ -661,15 +1334,21 @@ pub fn convert_project(request: &ConversionRequest) -> Result<ConversionReport, 
     let sdk_path = Path::new(&request.sdk_path);
     let pack_path = Path::new(&request.pack_path);
     let output_path = Path::new(&request.output_path);
-    let resources = validate_resources(sdk_path, pack_path)?;
     let inspection = inspect_project(project_path)?;
-    if !resources
-        .devices
-        .iter()
-        .any(|device| device == &inspection.device)
-    {
-        return Err(format!("所选 Pack 不支持器件 {}", inspection.device));
-    }
+    let resources = if inspection.kind == ProjectKind::Ccs {
+        let resources = validate_resources(sdk_path, pack_path)?;
+        if !resources
+            .devices
+            .iter()
+            .any(|device| device == &inspection.device)
+        {
+            return Err(format!("所选 Pack 不支持器件 {}", inspection.device));
+        }
+        Some(resources)
+    } else {
+        validate_sdk(sdk_path)?;
+        None
+    };
     let template_root = sdk_path
         .join("examples/nortos")
         .join(format!("LP_{}", inspection.device))
@@ -688,7 +1367,7 @@ pub fn convert_project(request: &ConversionRequest) -> Result<ConversionReport, 
         match inspection.kind {
             ProjectKind::Ccs => generate_keil(
                 &inspection,
-                &resources,
+                resources.as_ref().unwrap(),
                 sdk_path,
                 &template_root,
                 &staging,
@@ -1394,7 +2073,7 @@ fn inspect_ccs(path: &Path) -> Result<ProjectInspection, String> {
     let mut files = Vec::new();
     collect_local_sources(root, root, &mut files)?;
     files.sort_by(|left, right| left.path.cmp(&right.path));
-    let warnings = files
+    let mut warnings = files
         .iter()
         .filter(|file| {
             file.path.to_ascii_lowercase().contains("startup_") && file.file_type == "source"
@@ -1405,7 +2084,22 @@ fn inspect_ccs(path: &Path) -> Result<ProjectInspection, String> {
                 file.path
             )
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let requires_sysconfig = files.iter().any(|file| file.file_type == "syscfg")
+        || files.iter().any(|file| {
+            matches!(file.file_type.as_str(), "source" | "header")
+                && fs::read_to_string(root.join(&file.path))
+                    .is_ok_and(|content| content.contains("ti_msp_dl_config.h"))
+        });
+    if requires_sysconfig
+        && (find_generated_sysconfig_file(root, "ti_msp_dl_config.c")?.is_none()
+            || find_generated_sysconfig_file(root, "ti_msp_dl_config.h")?.is_none())
+    {
+        warnings.push(
+            "工程使用 SysConfig，但缺少 ti_msp_dl_config.c/h；如果本机没有 CCS，请让发送方先构建一次并一并发送生成文件，或在本机配置 SysConfig/CCS 后再转换"
+                .into(),
+        );
+    }
     Ok(ProjectInspection {
         kind: ProjectKind::Ccs,
         target_kind: ProjectKind::Keil,
@@ -1699,21 +2393,17 @@ fn dedup(values: &mut Vec<String>) {
 }
 
 pub fn validate_resources(sdk_path: &Path, pack_path: &Path) -> Result<ResourceInfo, String> {
-    let product_path = sdk_path.join(".metadata/product.json");
-    let product: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(&product_path)
-            .map_err(|_| format!("SDK 无效：未找到 {}", product_path.display()))?,
-    )
-    .map_err(|error| format!("SDK product.json 无法解析：{error}"))?;
-    if product.get("name").and_then(|value| value.as_str()) != Some("mspm0_sdk") {
-        return Err("所选目录不是 MSPM0 SDK".into());
-    }
-    let sdk_version = product
-        .get("version")
-        .and_then(|value| value.as_str())
-        .ok_or("SDK product.json 缺少版本号")?
-        .to_string();
+    let sdk_version = validate_sdk(sdk_path)?;
+    let (pack_name, pack_version, devices) = validate_pack(pack_path)?;
+    Ok(ResourceInfo {
+        sdk_version,
+        pack_name,
+        pack_version,
+        devices,
+    })
+}
 
+fn validate_pack(pack_path: &Path) -> Result<(String, String, Vec<String>), String> {
     let pdsc = Element::parse(read_pdsc(pack_path)?.as_bytes())
         .map_err(|error| format!("Pack PDSC 无法解析：{error}"))?;
     let pack_name = child_text(&pdsc, "name").ok_or("Pack PDSC 缺少名称")?;
@@ -1728,12 +2418,24 @@ pub fn validate_resources(sdk_path: &Path, pack_path: &Path) -> Result<ResourceI
     if devices.is_empty() {
         return Err("Pack PDSC 未声明任何器件".into());
     }
-    Ok(ResourceInfo {
-        sdk_version,
-        pack_name,
-        pack_version,
-        devices,
-    })
+    Ok((pack_name, pack_version, devices))
+}
+
+fn validate_sdk(sdk_path: &Path) -> Result<String, String> {
+    let product_path = sdk_path.join(".metadata/product.json");
+    let product: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&product_path)
+            .map_err(|_| format!("SDK 无效：未找到 {}", product_path.display()))?,
+    )
+    .map_err(|error| format!("SDK product.json 无法解析：{error}"))?;
+    if product.get("name").and_then(|value| value.as_str()) != Some("mspm0_sdk") {
+        return Err("所选目录不是 MSPM0 SDK".into());
+    }
+    Ok(product
+        .get("version")
+        .and_then(|value| value.as_str())
+        .ok_or("SDK product.json 缺少版本号")?
+        .to_string())
 }
 
 fn read_pdsc(pack_path: &Path) -> Result<String, String> {
@@ -1744,6 +2446,14 @@ fn read_pdsc(pack_path: &Path) -> Result<String, String> {
     }
     if !pack_path.is_file() {
         return Err("Pack 文件或目录不存在".into());
+    }
+    if pack_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("pdsc"))
+    {
+        return fs::read_to_string(pack_path)
+            .map_err(|error| format!("无法读取 {}：{error}", pack_path.display()));
     }
     let file = File::open(pack_path).map_err(|error| format!("无法打开 Pack：{error}"))?;
     let mut archive =
@@ -1932,6 +2642,121 @@ mod tests {
     }
 
     #[test]
+    fn discovers_an_installed_pack_for_the_project_device() {
+        let root = temp_dir("discover-environment");
+        let project = root.join("project");
+        let sdk = root.join("mspm0_sdk_2_10_00_04");
+        let keil = root.join("Keil_v5");
+        let pack = keil.join("ARM/PACK/TexasInstruments/MSPM0G1X0X_G3X0X_DFP/1.3.1");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(sdk.join(".metadata")).unwrap();
+        fs::create_dir_all(keil.join("UV4")).unwrap();
+        fs::create_dir_all(&pack).unwrap();
+        fs::write(
+            project.join(".project"),
+            "<projectDescription><name>demo</name></projectDescription>",
+        )
+        .unwrap();
+        fs::write(project.join(".cproject"), r#"<cproject><option superClass="compiler.DEFINE"><listOptionValue value="__MSPM0G3507__"/></option></cproject>"#).unwrap();
+        fs::write(project.join("main.c"), "int main(void) { return 0; }").unwrap();
+        fs::write(
+            sdk.join(".metadata/product.json"),
+            r#"{"name":"mspm0_sdk","version":"2.10.00.04"}"#,
+        )
+        .unwrap();
+        fs::write(keil.join("UV4/UV4.exe"), "fixture").unwrap();
+        fs::write(
+            pack.join("TexasInstruments.MSPM0G1X0X_G3X0X_DFP.pdsc"),
+            r#"<package><vendor>TexasInstruments</vendor><name>MSPM0G1X0X_G3X0X_DFP</name><releases><release version="1.3.1"/></releases><devices><family><device Dname="MSPM0G3507"/></family></devices></package>"#,
+        )
+        .unwrap();
+        fs::create_dir_all(keil.join("ARM/PACK/.Web")).unwrap();
+        fs::write(
+            keil.join("ARM/PACK/.Web/TexasInstruments.MSPM0G1X0X_G3X0X_DFP.pdsc"),
+            r#"<package><vendor>TexasInstruments</vendor><name>MSPM0G1X0X_G3X0X_DFP</name><releases><release version="9.9.9"/></releases><devices><family><device Dname="MSPM0G3507"/></family></devices></package>"#,
+        )
+        .unwrap();
+
+        let request = EnvironmentRequest {
+            project_path: project.to_string_lossy().into_owned(),
+            sdk_path: sdk.to_string_lossy().into_owned(),
+            pack_path: String::new(),
+            ccs_path: String::new(),
+            keil_path: keil.to_string_lossy().into_owned(),
+            sysconfig_path: String::new(),
+            search_depth: 2,
+        };
+        let found = discover_environment(&request).unwrap();
+
+        assert_eq!(
+            Path::new(found.pack_path.as_deref().unwrap())
+                .canonicalize()
+                .unwrap(),
+            pack.canonicalize().unwrap()
+        );
+        assert!(found.pack_installed);
+        assert_eq!(found.pack_name.as_deref(), Some("MSPM0G1X0X_G3X0X_DFP"));
+        assert_eq!(found.pack_version.as_deref(), Some("1.3.1"));
+        assert_eq!(
+            found.pack_download_url.as_deref(),
+            Some("https://www.keil.arm.com/packs/mspm0g1x0x_g3x0x_dfp-texasinstruments/boards/")
+        );
+
+        fs::remove_dir_all(keil.join("ARM/PACK/TexasInstruments")).unwrap();
+        let catalog = discover_environment(&request).unwrap();
+        assert!(!catalog.pack_installed);
+        assert_eq!(catalog.pack_version.as_deref(), Some("9.9.9"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn keeps_existing_keil_tools_and_reuses_an_equivalent_sysconfig_entry() {
+        let registry = r#"
+Mtx0    REG_SZ    User Tool
+Mex0    REG_SZ    C:\tools\user.exe
+Mtx1    REG_SZ    Sysconfig v1.26.2
+Mex1    REG_SZ    "D:\ti\ccs2100\sysconfig_1.26.2\nw\nw.exe" "D:\ti\ccs2100\sysconfig_1.26.2"
+"#;
+        assert_eq!(
+            choose_keil_tool_slot(
+                registry,
+                r#""D:\ti\ccs2100\sysconfig_1.26.2\nw\nw.exe" "D:\ti\ccs2100\sysconfig_1.26.2""#,
+            ),
+            Some((1, true))
+        );
+
+        let without_sysconfig =
+            "Mtx0    REG_SZ    User Tool\nMex0    REG_SZ    C:\\tools\\user.exe";
+        assert_eq!(
+            choose_keil_tool_slot(without_sysconfig, "sysconfig-command"),
+            Some((1, false))
+        );
+    }
+
+    #[test]
+    fn updates_the_sdk_keil_sysconfig_files_with_selected_paths() {
+        let bat = "@echo off\r\nset SYSCFG_PATH=old\\sysconfig_cli.bat\r\necho ready\r\n";
+        let cfg = "[Old]\r\nCommand=old\r\nInitial Folder=old\r\nArguments=keep\r\n";
+        let (updated_bat, updated_cfg) = render_keil_sysconfig_files(
+            bat,
+            cfg,
+            Path::new(r"D:\ti\mspm0_sdk_2_10_00_04"),
+            "2.10.00.04",
+            Path::new(r"D:\ti\sysconfig_1.26.2"),
+        )
+        .unwrap();
+
+        assert!(
+            updated_bat.contains(r#"set SYSCFG_PATH="D:\ti\sysconfig_1.26.2\sysconfig_cli.bat""#)
+        );
+        assert!(updated_cfg.contains("[Sysconfig v1.26.2 - MSPM0 SDK v2_10_00_04]"));
+        assert!(updated_cfg
+            .contains(r#"Command="D:\ti\sysconfig_1.26.2\nw\nw.exe" "D:\ti\sysconfig_1.26.2""#));
+        assert!(updated_cfg.contains(r"Initial Folder=D:\ti\mspm0_sdk_2_10_00_04"));
+        assert!(updated_cfg.contains("Arguments=keep"));
+    }
+
+    #[test]
     fn inspects_a_ccs_project_for_conversion() {
         let root = temp_dir("inspect-ccs");
         fs::write(
@@ -1952,6 +2777,30 @@ mod tests {
         assert_eq!(result.defines, ["APP_DEBUG", "__MSPM0G3507__"]);
         assert_eq!(result.files.len(), 1);
         assert_eq!(result.target_kind, ProjectKind::Keil);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn warns_when_a_received_ccs_project_lacks_generated_sysconfig_files() {
+        let root = temp_dir("inspect-missing-sysconfig");
+        fs::write(
+            root.join(".project"),
+            "<projectDescription><name>Blinky</name></projectDescription>",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".cproject"),
+            r#"<cproject><option superClass="compiler.DEFINE"><listOptionValue value="__MSPM0G3507__"/></option></cproject>"#,
+        )
+        .unwrap();
+        fs::write(root.join("main.c"), "#include \"ti_msp_dl_config.h\"").unwrap();
+        fs::write(root.join("demo.syscfg"), "// fixture").unwrap();
+
+        let result = inspect_project(&root).unwrap();
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("ti_msp_dl_config.c/h") && warning.contains("发送方")));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2102,10 +2951,7 @@ void SYSCFG_DL_init(void);"#,
                 .join("data/mspm0_sdk_2_10_00_04")
                 .to_string_lossy()
                 .into_owned(),
-            pack_path: workspace
-                .join("data/TexasInstruments.MSPM0G1X0X_G3X0X_DFP.1.3.1.pack")
-                .to_string_lossy()
-                .into_owned(),
+            pack_path: String::new(),
             output_path: output.to_string_lossy().into_owned(),
         })
         .unwrap();

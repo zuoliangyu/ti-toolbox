@@ -5,13 +5,31 @@ import "./styles.css";
 
 type ProjectKind = "ccs" | "keil";
 
-interface ResourceInfo {
-  sdkVersion: string;
-  packName: string;
-  packVersion: string;
-  devices: string[];
-  ccsExecutable: string;
-  keilExecutable: string;
+interface EnvironmentDiscovery {
+  projectKind: ProjectKind;
+  device: string;
+  sdkPath: string | null;
+  sdkVersion: string | null;
+  packPath: string | null;
+  packName: string | null;
+  packVersion: string | null;
+  packInstalled: boolean;
+  packDownloadUrl: string | null;
+  ccsPath: string | null;
+  ccsExecutable: string | null;
+  keilPath: string | null;
+  keilExecutable: string | null;
+  sysconfigPath: string | null;
+  sysconfigExecutable: string | null;
+  warnings: string[];
+}
+
+interface KeilSysConfigResult {
+  changed: boolean;
+  slot: number;
+  title: string;
+  updatedFiles: string[];
+  backupFiles: string[];
 }
 
 interface ProjectFile {
@@ -78,52 +96,16 @@ app.innerHTML = `
 
     <main class="workflow-card">
       <nav class="progress" aria-label="转换步骤">
-        <div id="resource-progress" data-state="idle"><b>1</b><span><strong>开发资源</strong><small>SDK、Pack 与 IDE</small></span></div>
+        <div id="project-progress" data-state="idle"><b>1</b><span><strong>源工程</strong><small>先识别转换方向</small></span></div>
         <i></i>
-        <div id="project-progress" data-state="idle"><b>2</b><span><strong>源工程</strong><small>自动识别类型</small></span></div>
+        <div id="resource-progress" data-state="idle"><b>2</b><span><strong>开发环境</strong><small>按方向自动检测</small></span></div>
         <i></i>
         <div id="output-progress" data-state="idle"><b>3</b><span><strong>输出目录</strong><small>生成目标工程</small></span></div>
       </nav>
 
-      <section class="workflow-section" id="resource-step" data-state="idle">
-        <header class="section-title">
-          <div><span>01</span><div><h2>配置开发资源</h2><p>SDK、Pack、CCS 与 Keil 路径只保存在当前电脑</p></div></div>
-          <button class="text-button" id="validate-resources">验证资源</button>
-        </header>
-        <div class="field-grid">
-          <label>
-            <span>MSPM0 SDK 根目录</span>
-            <div class="path-control"><input id="sdk-path" readonly placeholder="包含 .metadata/product.json 的目录" /><button id="pick-sdk">浏览</button></div>
-          </label>
-          <label>
-            <span>CMSIS Pack 文件</span>
-            <div class="path-control"><input id="pack-path" readonly placeholder="TexasInstruments.*.pack" /><button id="pick-pack">浏览</button></div>
-          </label>
-          <label>
-            <span>CCS 安装目录</span>
-            <div class="path-control"><input id="ccs-path" readonly placeholder="例如 D:\\ti\\ccs2100\\ccs\\theia" /><button id="pick-ccs">浏览</button></div>
-          </label>
-          <label>
-            <span>Keil 安装目录</span>
-            <div class="path-control"><input id="keil-path" readonly placeholder="例如 D:\\Keil_v5" /><button id="pick-keil">浏览</button></div>
-          </label>
-          <label class="search-depth-field">
-            <span>工具目录向下搜索层级</span>
-            <select id="tool-search-depth">
-              <option value="0">0 级（仅当前目录）</option>
-              <option value="1">1 级</option>
-              <option value="2">2 级（默认）</option>
-              <option value="3">3 级</option>
-              <option value="4">4 级（最大）</option>
-            </select>
-          </label>
-        </div>
-        <div class="inline-result muted" id="resource-result"><span></span><p>选择资源后会自动验证版本和器件支持。</p></div>
-      </section>
-
       <section class="workflow-section" id="project-step" data-state="idle">
         <header class="section-title">
-          <div><span>02</span><div><h2>选择源工程</h2><p>解析配置后执行真实工具链构建验证</p></div></div>
+          <div><span>01</span><div><h2>选择源工程</h2><p>解析后只要求当前方向真正需要的资源</p></div></div>
           <div class="section-actions">
             <button class="text-button" id="validate-source" disabled>一键构建验证</button>
             <button class="text-button" id="inspect-project">解析工程</button>
@@ -141,9 +123,55 @@ app.innerHTML = `
               <option value="in-place">原工程直接构建（更新 Debug/SysConfig）</option>
             </select>
           </label>
-          <p><strong class="build-recommendation">建议转换前先执行“一键构建验证”</strong>，提前发现 CCS 普通构建可能掩盖的未定义符号；两种验证方式都会执行严格链接。</p>
+          <p><strong class="build-recommendation">建议转换前先执行“一键构建验证”</strong>；没有源 IDE 时仍可带风险继续转换，已有失败结果则必须先修复。</p>
         </div>
-        <div class="inspection empty" id="inspection">工程解析与构建验证结果会显示在这里。</div>
+        <div class="inspection empty" id="inspection">请先选择工程，工具会自动识别转换方向。</div>
+      </section>
+
+      <section class="workflow-section" id="resource-step" data-state="idle">
+        <header class="section-title">
+          <div><span>02</span><div><h2>配置开发环境</h2><p>CCS 与 Keil 仅在对应构建验证时需要</p></div></div>
+          <div class="section-actions">
+            <button class="text-button" id="configure-sysconfig" disabled>配置 Keil SysConfig</button>
+            <button class="text-button" id="detect-environment" disabled>自动检测环境</button>
+          </div>
+        </header>
+        <div class="field-grid">
+          <label>
+            <span>MSPM0 SDK 根目录（必需）</span>
+            <div class="path-control"><input id="sdk-path" readonly placeholder="包含 .metadata/product.json 的目录" /><button id="pick-sdk">浏览</button></div>
+          </label>
+          <label>
+            <span>CMSIS Pack（CCS → Keil 必需）</span>
+            <div class="path-control"><input id="pack-path" readonly placeholder="自动检测已安装 Pack，或选择 .pack/.pdsc" /><button id="pick-pack">浏览</button></div>
+          </label>
+          <label>
+            <span>CCS 安装目录（可选）</span>
+            <div class="path-control"><input id="ccs-path" readonly placeholder="例如 D:\\ti\\ccs2100\\ccs\\theia" /><button id="pick-ccs">浏览</button></div>
+          </label>
+          <label>
+            <span>Keil 安装目录（可选）</span>
+            <div class="path-control"><input id="keil-path" readonly placeholder="例如 D:\\Keil_v5" /><button id="pick-keil">浏览</button></div>
+          </label>
+          <label>
+            <span>SysConfig 根目录（可选）</span>
+            <div class="path-control"><input id="sysconfig-path" readonly placeholder="可来自 CCS，也可独立安装" /><button id="pick-sysconfig">浏览</button></div>
+          </label>
+          <label class="search-depth-field">
+            <span>工具目录向下搜索层级</span>
+            <select id="tool-search-depth">
+              <option value="0">0 级（仅当前目录）</option>
+              <option value="1">1 级</option>
+              <option value="2">2 级（默认）</option>
+              <option value="3">3 级</option>
+              <option value="4">4 级（最大）</option>
+            </select>
+          </label>
+        </div>
+        <div class="inline-result muted resource-result" id="resource-result">
+          <span></span><p>解析工程后可自动检测 SDK、Pack、CCS、Keil 与 SysConfig。</p>
+          <button class="text-button" id="pack-download" hidden>打开 Pack 下载页</button>
+        </div>
       </section>
 
       <section class="workflow-section" id="output-step" data-state="idle">
@@ -161,7 +189,7 @@ app.innerHTML = `
           <div class="status muted" id="status" role="status" aria-live="polite">
             <strong>准备就绪</strong><span>按顺序完成以上三步即可开始转换。</span>
           </div>
-          <div class="safety-note"><span>✓ 转换过程只读</span><span>✓ CCS 验证会更新构建产物</span><span>✓ 不覆盖目标文件</span></div>
+          <div class="safety-note"><span>✓ IDE 可选</span><span>✓ 未验证时明确提示风险</span><span>✓ 不覆盖目标文件</span></div>
         </div>
         <button class="primary" id="convert" disabled><strong>开始转换</strong><small id="convert-caption">请先完成资源、工程和输出配置</small></button>
       </section>
@@ -175,6 +203,7 @@ const sdkInput = element<HTMLInputElement>("sdk-path");
 const packInput = element<HTMLInputElement>("pack-path");
 const ccsInput = element<HTMLInputElement>("ccs-path");
 const keilInput = element<HTMLInputElement>("keil-path");
+const sysconfigInput = element<HTMLInputElement>("sysconfig-path");
 const projectInput = element<HTMLInputElement>("project-path");
 const outputInput = element<HTMLInputElement>("output-path");
 const resourceResult = element<HTMLElement>("resource-result");
@@ -186,10 +215,14 @@ const convertCaption = element<HTMLElement>("convert-caption");
 const validateSourceButton = element<HTMLButtonElement>("validate-source");
 const ccsBuildMode = element<HTMLSelectElement>("ccs-build-mode");
 const toolSearchDepth = element<HTMLSelectElement>("tool-search-depth");
+const detectEnvironmentButton = element<HTMLButtonElement>("detect-environment");
+const configureSysconfigButton = element<HTMLButtonElement>("configure-sysconfig");
+const packDownloadButton = element<HTMLButtonElement>("pack-download");
 
-let resources: ResourceInfo | null = null;
+let environment: EnvironmentDiscovery | null = null;
 let inspection: ProjectInspection | null = null;
 let sourceValidatedPath = "";
+let sourceValidationFailed = false;
 let conversionProjectPath = "";
 let sourceCleanupPath: string | null = null;
 let activeBuildOperation = "";
@@ -199,6 +232,7 @@ sdkInput.value = localStorage.getItem("ccs2keil.sdkPath") ?? "";
 packInput.value = localStorage.getItem("ccs2keil.packPath") ?? "";
 ccsInput.value = localStorage.getItem("ccs2keil.ccsPath") ?? "";
 keilInput.value = localStorage.getItem("ccs2keil.keilPath") ?? "";
+sysconfigInput.value = localStorage.getItem("ccs2keil.sysconfigPath") ?? "";
 toolSearchDepth.value = localStorage.getItem("ccs2keil.toolSearchDepth") ?? "2";
 
 void listen<[string, string]>("build-log", ({ payload: [operationId, chunk] }) => {
@@ -213,8 +247,8 @@ element("pick-sdk").addEventListener("click", async () => {
     await discardSourceValidation();
     sdkInput.value = selected;
     localStorage.setItem("ccs2keil.sdkPath", selected);
-    resources = null;
-    await validateResources();
+    environment = null;
+    if (inspection) await detectEnvironment();
   }
 });
 
@@ -222,14 +256,14 @@ element("pick-pack").addEventListener("click", async () => {
   const selected = await open({
     multiple: false,
     defaultPath: packInput.value || undefined,
-    filters: [{ name: "CMSIS Pack", extensions: ["pack"] }],
+    filters: [{ name: "CMSIS Pack", extensions: ["pack", "pdsc"] }],
   });
   if (typeof selected === "string") {
     await discardSourceValidation();
     packInput.value = selected;
     localStorage.setItem("ccs2keil.packPath", selected);
-    resources = null;
-    await validateResources();
+    environment = null;
+    if (inspection) await detectEnvironment();
   }
 });
 
@@ -239,8 +273,8 @@ element("pick-ccs").addEventListener("click", async () => {
     await discardSourceValidation();
     ccsInput.value = selected;
     localStorage.setItem("ccs2keil.ccsPath", selected);
-    resources = null;
-    await validateResources();
+    environment = null;
+    if (inspection) await detectEnvironment();
   }
 });
 
@@ -250,16 +284,26 @@ element("pick-keil").addEventListener("click", async () => {
     await discardSourceValidation();
     keilInput.value = selected;
     localStorage.setItem("ccs2keil.keilPath", selected);
-    resources = null;
-    await validateResources();
+    environment = null;
+    if (inspection) await detectEnvironment();
+  }
+});
+
+element("pick-sysconfig").addEventListener("click", async () => {
+  const selected = await open({ directory: true, multiple: false, defaultPath: sysconfigInput.value || undefined });
+  if (typeof selected === "string") {
+    sysconfigInput.value = selected;
+    localStorage.setItem("ccs2keil.sysconfigPath", selected);
+    environment = null;
+    if (inspection) await detectEnvironment();
   }
 });
 
 toolSearchDepth.addEventListener("change", async () => {
   await discardSourceValidation();
   localStorage.setItem("ccs2keil.toolSearchDepth", toolSearchDepth.value);
-  resources = null;
-  await validateResources();
+  environment = null;
+  if (inspection) await detectEnvironment();
 });
 
 element("pick-project").addEventListener("click", async () => {
@@ -268,6 +312,9 @@ element("pick-project").addEventListener("click", async () => {
     await discardSourceValidation();
     projectInput.value = selected;
     inspection = null;
+    environment = null;
+    packDownloadButton.hidden = true;
+    markStep("resource", "idle");
     await inspectProject();
   }
 });
@@ -282,41 +329,112 @@ element("pick-output").addEventListener("click", async () => {
   }
 });
 
-element("validate-resources").addEventListener("click", validateResources);
 element("inspect-project").addEventListener("click", inspectProject);
+detectEnvironmentButton.addEventListener("click", detectEnvironment);
+configureSysconfigButton.addEventListener("click", configureKeilSysconfig);
+packDownloadButton.addEventListener("click", openPackDownload);
 validateSourceButton.addEventListener("click", validateSourceProject);
 ccsBuildMode.addEventListener("change", () => void discardSourceValidation());
 convertButton.addEventListener("click", convertProject);
 
-if (sdkInput.value && packInput.value && ccsInput.value && keilInput.value) void validateResources();
-
-async function validateResources(): Promise<void> {
-  if (!sdkInput.value || !packInput.value || !ccsInput.value || !keilInput.value) {
-    showStatus("资源尚未配置", "请先选择 SDK、Pack、CCS 和 Keil。", true);
-    return;
-  }
-  setBusy(true, "正在验证开发资源", "读取 SDK 与 Pack 元数据…");
+async function detectEnvironment(): Promise<void> {
+  if (!inspection || !projectInput.value) return;
+  setBusy(true, "正在自动检测开发环境", "按当前转换方向查找 SDK、Pack、CCS、Keil 与 SysConfig…");
   try {
-    resources = await invoke<ResourceInfo>("validate_resources", {
-      sdkPath: sdkInput.value,
-      packPath: packInput.value,
-      ccsPath: ccsInput.value,
-      keilPath: keilInput.value,
-      searchDepth: Number(toolSearchDepth.value),
+    environment = await invoke<EnvironmentDiscovery>("discover_environment", {
+      request: {
+        projectPath: projectInput.value,
+        sdkPath: sdkInput.value,
+        packPath: packInput.value,
+        ccsPath: ccsInput.value,
+        keilPath: keilInput.value,
+        sysconfigPath: sysconfigInput.value,
+        searchDepth: Number(toolSearchDepth.value),
+      },
     });
-    resourceResult.className = "inline-result success";
-    resourceResult.replaceChildren(resultDot(), textBlock("p", `SDK ${resources.sdkVersion} · ${resources.packName} ${resources.packVersion} · 支持 ${resources.devices.length} 个器件\nCCS ${resources.ccsExecutable}\nKeil ${resources.keilExecutable}`));
-    markStep("resource", "ready");
-    showStatus("开发资源验证通过", "现在可以选择需要转换的工程。");
+    applyDiscoveredPath(sdkInput, "ccs2keil.sdkPath", environment.sdkPath);
+    applyDiscoveredPath(packInput, "ccs2keil.packPath", environment.packPath);
+    applyDiscoveredPath(ccsInput, "ccs2keil.ccsPath", environment.ccsPath);
+    applyDiscoveredPath(keilInput, "ccs2keil.keilPath", environment.keilPath);
+    applyDiscoveredPath(sysconfigInput, "ccs2keil.sysconfigPath", environment.sysconfigPath);
+    renderEnvironment(environment);
+    const ready = environmentReady();
+    markStep("resource", ready ? "ready" : "error");
+    showStatus(
+      ready ? "开发环境已就绪" : "开发环境仍缺少必需资源",
+      ready ? "可执行构建验证，也可以直接设置输出目录。" : "请根据红色提示补充 SDK 或 Pack。",
+      !ready,
+    );
   } catch (error) {
-    resources = null;
-    resourceResult.className = "inline-result error";
-    resourceResult.replaceChildren(resultDot(), textBlock("p", errorMessage(error)));
+    environment = null;
+    packDownloadButton.hidden = true;
+    resourceResult.className = "inline-result error resource-result";
+    resourceResult.replaceChildren(resultDot(), textBlock("p", errorMessage(error)), packDownloadButton);
     markStep("resource", "error");
-    showStatus("资源验证失败", errorMessage(error), true);
+    showStatus("环境检测失败", errorMessage(error), true);
   } finally {
     setBusy(false);
   }
+}
+
+function renderEnvironment(found: EnvironmentDiscovery): void {
+  const pack = inspection?.kind === "ccs"
+    ? found.packName
+      ? `${found.packName} ${found.packVersion ?? ""} · ${found.packInstalled ? "Keil 已安装" : "未安装，请下载后安装"}`
+      : "未找到支持当前芯片的 Pack"
+    : "当前方向不需要 Pack";
+  const lines = [
+    `SDK：${found.sdkVersion ? `${found.sdkVersion} · ${found.sdkPath}` : "未找到（必需）"}`,
+    `Pack：${pack}`,
+    `CCS：${found.ccsExecutable ?? "未找到（仅影响 CCS 构建验证）"}`,
+    `Keil：${found.keilExecutable ?? "未找到（仅影响 Keil 构建验证）"}`,
+    `SysConfig：${found.sysconfigExecutable ?? "未找到（已有生成文件仍可转换）"}`,
+    ...found.warnings.map((warning) => `提示：${warning}`),
+  ];
+  const ready = environmentReady(found);
+  resourceResult.className = `inline-result ${ready ? "success" : "error"} resource-result`;
+  packDownloadButton.hidden = found.packInstalled || !found.packDownloadUrl;
+  resourceResult.replaceChildren(resultDot(), textBlock("p", lines.join("\n")), packDownloadButton);
+}
+
+async function configureKeilSysconfig(): Promise<void> {
+  if (!environment?.sdkPath || !environment.keilPath || !environment.sysconfigPath) return;
+  const message = `将备份并更新以下 SDK 配置：\n${environment.sdkPath}\\tools\\keil\\syscfg.bat\n${environment.sdkPath}\\tools\\keil\\MSPM0_SDK_syscfg_menu_import.cfg\n\n同时写入当前用户的 Keil Tools 菜单。是否继续？`;
+  if (!window.confirm(message)) return;
+  setBusy(true, "正在配置 Keil SysConfig", "备份 SDK 配置并更新 Keil Tools 菜单…");
+  try {
+    const result = await invoke<KeilSysConfigResult>("configure_keil_sysconfig", {
+      request: {
+        sdkPath: environment.sdkPath,
+        keilPath: environment.keilPath,
+        sysconfigPath: environment.sysconfigPath,
+        searchDepth: Number(toolSearchDepth.value),
+      },
+    });
+    showStatus(
+      result.changed ? "Keil SysConfig 配置完成" : "Keil SysConfig 已经配置完成",
+      `Tools 槽位 ${result.slot} · ${result.title}${result.updatedFiles.length ? ` · 已更新 ${result.updatedFiles.length} 个 SDK 文件` : ""}${result.backupFiles.length ? ` · 已创建 ${result.backupFiles.length} 个备份` : ""}`,
+    );
+  } catch (error) {
+    showStatus("Keil SysConfig 配置失败", errorMessage(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function openPackDownload(): Promise<void> {
+  if (!environment?.packDownloadUrl) return;
+  try {
+    await invoke("open_pack_download", { url: environment.packDownloadUrl });
+  } catch (error) {
+    showStatus("无法打开 Pack 下载页", errorMessage(error), true);
+  }
+}
+
+function applyDiscoveredPath(input: HTMLInputElement, storageKey: string, value: string | null): void {
+  if (!value) return;
+  input.value = value;
+  localStorage.setItem(storageKey, value);
 }
 
 async function inspectProject(): Promise<void> {
@@ -325,14 +443,18 @@ async function inspectProject(): Promise<void> {
     return;
   }
   await discardSourceValidation();
+  environment = null;
+  markStep("resource", "idle");
   setBusy(true, "正在解析源工程", "读取工程配置和文件清单…");
+  let parsed = false;
   try {
     inspection = await invoke<ProjectInspection>("inspect_project", { projectPath: projectInput.value });
     renderInspection(inspection);
     directionView.textContent = `${kindLabel(inspection.kind)} → ${kindLabel(inspection.targetKind)}`;
     directionView.classList.add("ready");
     markStep("project", "ready");
-    showStatus(`已解析 ${inspection.name}`, `${inspection.device} · ${inspection.files.length} 个工程文件；请继续执行一键构建验证`);
+    showStatus(`已解析 ${inspection.name}`, `${inspection.device} · ${inspection.files.length} 个工程文件；正在检测所需环境`);
+    parsed = true;
   } catch (error) {
     inspection = null;
     inspectionView.className = "inspection error";
@@ -344,10 +466,11 @@ async function inspectProject(): Promise<void> {
   } finally {
     setBusy(false);
   }
+  if (parsed) await detectEnvironment();
 }
 
 async function validateSourceProject(): Promise<void> {
-  if (!inspection || !resources) return;
+  if (!inspection || !sourceToolAvailable()) return;
   const ccsInPlace = ccsBuildMode.value === "in-place";
   if (inspection.kind === "ccs" && ccsInPlace && !window.confirm("原工程直接构建会执行 CCS Clean + Full Build，并更新源工程的 Debug、SysConfig 等构建产物。是否继续？")) return;
   setBusy(true, `正在执行 ${kindLabel(inspection.kind)} 构建验证`, inspection.kind === "ccs" ? `${ccsInPlace ? "在原工程" : "在临时副本"}执行 Clean + Full Build，再关闭未使用 section 消除进行严格链接…` : "调用 Keil 构建源工程…");
@@ -355,12 +478,14 @@ async function validateSourceProject(): Promise<void> {
     const report = await runBuildValidation(projectInput.value, ccsInPlace);
     renderBuildReport(inspectionView, report);
     sourceValidatedPath = report.success ? projectInput.value : "";
+    sourceValidationFailed = !report.success;
     conversionProjectPath = report.validatedProjectPath ?? projectInput.value;
     sourceCleanupPath = report.cleanupPath;
     markStep("project", report.success ? "ready" : "error");
     showStatus(report.summary, report.success ? "源工程验证通过，可以开始转换。" : "源工程本身未通过严格验证，请先修复日志中的问题。", !report.success);
   } catch (error) {
     sourceValidatedPath = "";
+    sourceValidationFailed = false;
     conversionProjectPath = "";
     sourceCleanupPath = null;
     markStep("project", "error");
@@ -371,7 +496,8 @@ async function validateSourceProject(): Promise<void> {
 }
 
 async function convertProject(): Promise<void> {
-  if (!resources || !inspection || sourceValidatedPath !== projectInput.value || !outputInput.value) return;
+  if (!environmentReady() || !inspection || sourceValidationFailed || !outputInput.value) return;
+  if (sourceValidatedPath !== projectInput.value && !window.confirm("源工程尚未通过真实工具链构建验证，转换结果可能保留原工程中的编译或链接错误。是否仍要继续转换？")) return;
   setBusy(true, `正在生成 ${kindLabel(inspection.targetKind)} 工程`, "复制源码并生成目标工程配置…");
   try {
     const report = await invoke<ConversionReport>("convert_project", {
@@ -382,6 +508,19 @@ async function convertProject(): Promise<void> {
         outputPath: outputInput.value,
       },
     });
+    const canValidateTarget = report.targetKind === "ccs" ? Boolean(environment?.ccsExecutable) : Boolean(environment?.keilExecutable);
+    if (!canValidateTarget) {
+      statusView.className = "status success report";
+      statusView.replaceChildren(
+        textBlock("strong", `转换完成，未执行 ${kindLabel(report.targetKind)} 构建验证`),
+        textBlock("span", `${report.device} · 共生成 ${report.generatedFiles.length} 个文件；未配置目标 IDE，可稍后手动构建`),
+        textBlock("code", report.outputPath),
+        ...(report.warnings.length ? [textBlock("small", report.warnings.join("；"))] : []),
+      );
+      markStep("output", "complete");
+      await discardSourceValidation();
+      return;
+    }
     showStatus(`转换完成，正在验证 ${kindLabel(report.targetKind)} 工程`, "调用目标工具链进行真实构建…");
     let validation: BuildValidationReport;
     try {
@@ -416,6 +555,7 @@ async function convertProject(): Promise<void> {
 }
 
 function renderInspection(result: ProjectInspection): void {
+  ccsBuildMode.disabled = result.kind !== "ccs";
   inspectionView.className = "inspection";
   const details = document.createElement("div");
   details.className = "summary-grid";
@@ -529,20 +669,43 @@ function setBusy(busy: boolean, title?: string, detail?: string): void {
 }
 
 function updateActionState(): void {
-  validateSourceButton.disabled = !resources || !inspection;
+  detectEnvironmentButton.disabled = !inspection;
+  validateSourceButton.disabled = !sourceToolAvailable();
+  validateSourceButton.title = inspection && !sourceToolAvailable()
+    ? `未配置 ${kindLabel(inspection.kind)}，无法执行源工程构建验证`
+    : "";
+  configureSysconfigButton.disabled = !environment?.sdkPath || !environment.keilPath || !environment.sysconfigPath;
+  configureSysconfigButton.title = configureSysconfigButton.disabled
+    ? "需要 SDK、Keil 与 SysConfig 路径"
+    : "备份并更新 SDK 配置文件和 Keil Tools 菜单";
   const missing = [
-    !resources && "开发资源",
     !inspection && "源工程",
-    inspection && sourceValidatedPath !== projectInput.value && "构建验证",
+    inspection && !environment?.sdkPath && "MSPM0 SDK",
+    inspection?.kind === "ccs" && !environment?.packPath && "CMSIS Pack",
+    sourceValidationFailed && "修复构建错误",
     !outputInput.value && "输出目录",
   ].filter(Boolean);
   convertButton.disabled = missing.length > 0;
-  convertCaption.textContent = missing.length ? `还需设置：${missing.join("、")}` : "配置完整，可以开始生成目标工程";
+  convertCaption.textContent = missing.length
+    ? `还需设置：${missing.join("、")}`
+    : sourceValidatedPath === projectInput.value
+      ? "源工程验证通过，可以开始转换"
+      : "可以转换，建议先执行构建验证";
+}
+
+function environmentReady(found = environment): boolean {
+  return Boolean(found?.sdkPath && (found.projectKind !== "ccs" || found.packPath));
+}
+
+function sourceToolAvailable(): boolean {
+  if (!inspection || !environment) return false;
+  return inspection.kind === "ccs" ? Boolean(environment.ccsExecutable) : Boolean(environment.keilExecutable);
 }
 
 async function discardSourceValidation(): Promise<void> {
   if (sourceCleanupPath) await cleanupValidationCopy(sourceCleanupPath);
   sourceValidatedPath = "";
+  sourceValidationFailed = false;
   conversionProjectPath = "";
   sourceCleanupPath = null;
   updateActionState();
