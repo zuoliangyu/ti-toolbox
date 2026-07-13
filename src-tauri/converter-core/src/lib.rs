@@ -2070,8 +2070,9 @@ fn inspect_ccs(path: &Path) -> Result<ProjectInspection, String> {
         })
         .unwrap_or_else(|| file_name(root));
     let device = find_device(&cproject_text).ok_or("无法从 CCS 工程识别 MSPM0 芯片")?;
+    let excluded_sources = ccs_source_exclusions(&cproject);
     let mut files = Vec::new();
-    collect_local_sources(root, root, &mut files)?;
+    collect_local_sources(root, root, &excluded_sources, &mut files)?;
     files.sort_by(|left, right| left.path.cmp(&right.path));
     let mut warnings = files
         .iter()
@@ -2292,6 +2293,7 @@ fn collect_ccs_options(
 fn collect_local_sources(
     root: &Path,
     current: &Path,
+    excluded_sources: &[String],
     files: &mut Vec<ProjectFile>,
 ) -> Result<(), String> {
     const SKIPPED: &[&str] = &[
@@ -2306,21 +2308,24 @@ fn collect_local_sources(
     for entry in fs::read_dir(current).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let file_type = entry.file_type().map_err(|error| error.to_string())?;
-        if file_type.is_dir() {
-            if !SKIPPED.contains(&entry.file_name().to_string_lossy().as_ref()) {
-                collect_local_sources(root, &entry.path(), files)?;
-            }
-            continue;
-        }
-        let Some(kind) = source_type(&entry.path()) else {
-            continue;
-        };
         let relative = entry
             .path()
             .strip_prefix(root)
             .unwrap_or(&entry.path())
             .to_string_lossy()
             .replace('\\', "/");
+        if is_ccs_source_excluded(&relative, excluded_sources) {
+            continue;
+        }
+        if file_type.is_dir() {
+            if !SKIPPED.contains(&entry.file_name().to_string_lossy().as_ref()) {
+                collect_local_sources(root, &entry.path(), excluded_sources, files)?;
+            }
+            continue;
+        }
+        let Some(kind) = source_type(&entry.path()) else {
+            continue;
+        };
         files.push(ProjectFile {
             path: relative,
             group: source_group(kind).into(),
@@ -2328,6 +2333,60 @@ fn collect_local_sources(
         });
     }
     Ok(())
+}
+
+fn ccs_source_exclusions(cproject: &Element) -> Vec<String> {
+    let mut exclusions = Vec::new();
+    let Some(source_entries) = find_element(cproject, "sourceEntries") else {
+        return exclusions;
+    };
+    for child in &source_entries.children {
+        let XMLNode::Element(entry) = child else {
+            continue;
+        };
+        let base = normalize_ccs_source_path(
+            entry
+                .attributes
+                .get("name")
+                .map(String::as_str)
+                .unwrap_or(""),
+        );
+        for excluded in entry
+            .attributes
+            .get("excluding")
+            .map(String::as_str)
+            .unwrap_or("")
+            .split('|')
+        {
+            let excluded = normalize_ccs_source_path(excluded);
+            if excluded.is_empty() {
+                continue;
+            }
+            if base.is_empty() || excluded == base || excluded.starts_with(&format!("{base}/")) {
+                exclusions.push(excluded);
+            } else {
+                exclusions.push(format!("{base}/{excluded}"));
+            }
+        }
+    }
+    dedup(&mut exclusions);
+    exclusions
+}
+
+fn normalize_ccs_source_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn is_ccs_source_excluded(path: &str, exclusions: &[String]) -> bool {
+    let path = normalize_ccs_source_path(path);
+    exclusions.iter().any(|excluded| {
+        path == *excluded
+            || path
+                .strip_prefix(excluded)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    })
 }
 
 fn collect_projectspec_files(project: &Element, projectspec: &Path, files: &mut Vec<ProjectFile>) {
@@ -2777,6 +2836,41 @@ Mex1    REG_SZ    "D:\ti\ccs2100\sysconfig_1.26.2\nw\nw.exe" "D:\ti\ccs2100\sysc
         assert_eq!(result.defines, ["APP_DEBUG", "__MSPM0G3507__"]);
         assert_eq!(result.files.len(), 1);
         assert_eq!(result.target_kind, ProjectKind::Keil);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ignores_ccs_source_directories_excluded_from_build() {
+        let root = temp_dir("inspect-ccs-exclusions");
+        fs::create_dir_all(root.join("Drivers/DISABLED")).unwrap();
+        fs::create_dir_all(root.join("Drivers/ACTIVE")).unwrap();
+        fs::write(
+            root.join(".project"),
+            "<projectDescription><name>Blinky</name></projectDescription>",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".cproject"),
+            r#"<cproject><storageModule><configuration><sourceEntries><entry excluding="Drivers/DISABLED" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/></sourceEntries><option superClass="compiler.DEFINE"><listOptionValue value="__MSPM0G3507__"/></option></configuration></storageModule></cproject>"#,
+        )
+        .unwrap();
+        fs::write(root.join("main.c"), "int main(void) { return 0; }").unwrap();
+        fs::write(
+            root.join("Drivers/DISABLED/disabled.c"),
+            "void disabled(void) {}",
+        )
+        .unwrap();
+        fs::write(root.join("Drivers/ACTIVE/active.c"), "void active(void) {}").unwrap();
+
+        let result = inspect_project(&root).unwrap();
+        assert!(result
+            .files
+            .iter()
+            .any(|file| file.path.ends_with("active.c")));
+        assert!(!result
+            .files
+            .iter()
+            .any(|file| file.path.ends_with("disabled.c")));
         fs::remove_dir_all(root).unwrap();
     }
 
