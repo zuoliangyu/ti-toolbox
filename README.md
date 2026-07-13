@@ -5,12 +5,14 @@
 ## 当前能力
 
 - 自动识别 CCS `.cproject` / `.projectspec` 与 Keil `.uvprojx`
-- 用户自行选择 MSPM0 SDK 根目录和 CMSIS Pack 文件
+- 用户自行选择 MSPM0 SDK、CMSIS Pack、CCS 和 Keil 安装目录
 - 校验 SDK、Pack 版本及 Pack 器件清单
-- 转换前展示芯片、源文件、宏、Include Path 和风险提示
+- 转换前展示芯片、源文件、宏、Include Path 和风险提示，并执行源工程构建验证
+- CCS Clean + Full Build 后关闭未使用 section 消除再次链接，可发现被死代码消除掩盖的未定义符号
+- 转换后自动调用目标工具链构建，区分“转换完成”和“编译验证通过”
 - CCS → Keil：基于 SDK 官方 Keil empty 工程生成 `.uvprojx`
 - Keil → CCS：基于 SDK 官方 TI Clang empty 工程生成 `.projectspec`
-- 输出到空目录，原工程只读且不覆盖已有文件
+- 输出到空目录，转换过程不覆盖源文件；选择“原工程直接构建”时只更新 CCS 构建产物
 
 目前使用以下资源完成了实际样例验证：
 
@@ -28,12 +30,22 @@
 
 ## 使用方式
 
-1. 在“工具链资源”中选择 MSPM0 SDK 根目录和 `.pack` 文件。
-2. 选择 CCS 或 Keil 工程目录，点击“检查工程”。
-3. 选择一个空输出目录。
-4. 确认转换方向和警告后开始转换。
+1. 在“工具链资源”中选择 MSPM0 SDK、`.pack`、CCS 和 Keil 安装目录。
+2. 选择 CCS 或 Keil 工程目录，点击“解析工程”。
+3. 点击“一键构建验证”。CCS 工程可选择临时目录验证或原工程直接构建。
+4. 选择一个空输出目录并开始转换。
+5. 生成完成后工具自动调用目标工具链验证。
 
-SDK 和 Pack 路径保存在本机 WebView 的 `localStorage`，不会写进源工程。
+SDK、Pack、CCS 和 Keil 路径保存在本机 WebView 的 `localStorage`。
+
+### 构建验证
+
+CCS 验证先通过 CCS headless CLI 执行 Clean + Full Build，再复用 CCS 生成的对象文件和 `makefile`，以 `--unused_section_elimination=off` 做一次临时严格链接。第二步能发现普通 CCS 链接因移除未使用函数而忽略的未定义符号。
+
+- 临时目录验证（默认）：复制工程后构建，不修改原工程；转换器使用临时副本中新生成的 SysConfig 文件，转换结束后清理副本。
+- 原工程直接构建：在原工程执行 Clean + Full Build，会更新 `Debug`、SysConfig 等构建产物，执行前会再次确认。
+
+Keil 验证调用 `UV4.exe -b` 并解析构建日志。Keil 在构建失败时进程退出码仍可能为 `0`，因此工具以日志中的 `Error(s)` 结果为准。
 
 ### CCS 输出
 

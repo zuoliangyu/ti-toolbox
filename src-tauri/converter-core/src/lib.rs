@@ -4,7 +4,9 @@ use std::{
     fs::{self, File},
     io::Read,
     path::{Component, Path, PathBuf},
-    time::SystemTime,
+    process::{Command, Output},
+    thread,
+    time::{Duration, Instant, SystemTime},
 };
 use xmltree::{Element, XMLNode};
 
@@ -63,6 +65,396 @@ pub struct ConversionReport {
     pub output_path: String,
     pub generated_files: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildValidationReport {
+    pub success: bool,
+    pub summary: String,
+    pub log: String,
+    pub log_path: Option<String>,
+    pub validated_project_path: Option<String>,
+    pub cleanup_path: Option<String>,
+}
+
+pub fn validate_toolchains(ccs_path: &Path, keil_path: &Path) -> Result<(), String> {
+    locate_ccs_server(ccs_path)?;
+    locate_uv4(keil_path)?;
+    Ok(())
+}
+
+pub fn validate_project_build(
+    project_path: &Path,
+    ccs_path: &Path,
+    keil_path: &Path,
+    ccs_in_place: bool,
+) -> Result<BuildValidationReport, String> {
+    match detect_project(project_path)? {
+        ProjectKind::Ccs => validate_ccs_build(ccs_path, project_path, ccs_in_place),
+        ProjectKind::Keil => validate_keil_build(keil_path, project_path),
+    }
+}
+
+pub fn cleanup_validation_copy(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let temp = std::env::temp_dir()
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let path = path.canonicalize().map_err(|error| error.to_string())?;
+    let valid_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.starts_with("ccs2keil-ccs-validation-"));
+    if !path.starts_with(&temp) || !valid_name {
+        return Err("拒绝清理非 CCS2KEIL 临时验证目录".into());
+    }
+    fs::remove_dir_all(path).map_err(|error| format!("无法清理临时验证目录：{error}"))
+}
+
+fn validate_ccs_build(
+    ccs_path: &Path,
+    project_path: &Path,
+    ccs_in_place: bool,
+) -> Result<BuildValidationReport, String> {
+    let server = locate_ccs_server(ccs_path)?;
+    let ccs_root = server
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("无法确定 CCS 安装根目录")?;
+    let gmake = ccs_root.join("utils/bin/gmake.exe");
+    if !gmake.is_file() {
+        return Err(format!("CCS 缺少构建工具：{}", gmake.display()));
+    }
+
+    let inspection = inspect_project(project_path)?;
+    let project_root = if project_path.is_dir() {
+        project_path
+    } else {
+        project_path.parent().ok_or("无法确定 CCS 工程目录")?
+    };
+    let projectspec = (!project_root.join(".cproject").is_file())
+        .then(|| find_project_file(project_root, "projectspec", 3))
+        .transpose()?
+        .flatten();
+    let import_location = projectspec.as_deref().unwrap_or(project_root);
+    let temp = unique_temp_dir("ccs-validation");
+    let metadata = temp.join("metadata");
+    let workspace = temp.join("workspace");
+    fs::create_dir_all(&metadata).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+
+    let uses_temp_project = !ccs_in_place || projectspec.is_some();
+    let result = (|| {
+        let import_path = import_location.to_string_lossy();
+        let mut import_arguments = vec!["-ccs.location", import_path.as_ref()];
+        if uses_temp_project {
+            import_arguments.push("-ccs.copyIntoWorkspace");
+        }
+        let import = run_ccs(
+            &server,
+            &metadata,
+            &workspace,
+            "com.ti.ccs.apps.importProject",
+            &import_arguments,
+        )?;
+        if !import.status.success() {
+            return Err(format!("CCS 导入工程失败：\n{}", output_text(&import)));
+        }
+
+        let clean = run_ccs(
+            &server,
+            &metadata,
+            &workspace,
+            "com.ti.ccs.apps.buildProject",
+            &[
+                "-ccs.projects",
+                &inspection.name,
+                "-ccs.buildType",
+                "clean",
+                "-ccs.listProblems",
+            ],
+        )?;
+        let full = run_ccs(
+            &server,
+            &metadata,
+            &workspace,
+            "com.ti.ccs.apps.buildProject",
+            &[
+                "-ccs.projects",
+                &inspection.name,
+                "-ccs.buildType",
+                "full",
+                "-ccs.listProblems",
+            ],
+        )?;
+        let mut log = format!("{}\n{}", output_text(&clean), output_text(&full));
+        let normal_success = clean.status.success()
+            && full.status.success()
+            && log.contains("0 out of 1 projects have errors");
+        if !normal_success {
+            return Ok(BuildValidationReport {
+                success: false,
+                summary: "CCS Clean + Full Build 失败".into(),
+                log,
+                log_path: None,
+                validated_project_path: None,
+                cleanup_path: None,
+            });
+        }
+
+        let built_project = if uses_temp_project {
+            workspace.join(&inspection.name)
+        } else {
+            project_root.to_path_buf()
+        };
+        let build_dir = find_ccs_build_dir(&built_project, 4)?
+            .ok_or("CCS 构建成功，但未找到生成的 makefile/ccsObjs.opt")?;
+        let strict = run_strict_ccs_link(&gmake, &build_dir, &temp)?;
+        let strict_log = output_text(&strict);
+        log.push_str("\n\n===== CCS 严格链接（保留未使用 section）=====\n");
+        log.push_str(&strict_log);
+        let success = strict.status.success();
+        Ok(BuildValidationReport {
+            success,
+            summary: if success {
+                "CCS Clean + Full Build 与严格链接均通过".into()
+            } else if strict_log.contains("unresolved symbols remain") {
+                "CCS 普通构建通过，但严格链接发现未定义符号".into()
+            } else {
+                "CCS 普通构建通过，但严格链接失败".into()
+            },
+            log,
+            log_path: None,
+            validated_project_path: (success && uses_temp_project)
+                .then(|| built_project.to_string_lossy().into_owned()),
+            cleanup_path: (success && uses_temp_project)
+                .then(|| temp.to_string_lossy().into_owned()),
+        })
+    })();
+    let keep_temp = result
+        .as_ref()
+        .is_ok_and(|report| report.success && uses_temp_project);
+    if !keep_temp {
+        let _ = fs::remove_dir_all(&temp);
+    }
+    result
+}
+
+fn run_ccs(
+    server: &Path,
+    metadata: &Path,
+    workspace: &Path,
+    application: &str,
+    arguments: &[&str],
+) -> Result<Output, String> {
+    Command::new(server)
+        .args(["-nosplash", "-data"])
+        .arg(metadata)
+        .args(["-application", application, "-ccs.launcher", "ccs2keil"])
+        .arg("-ccs.defaultImportDestination")
+        .arg(workspace)
+        .args(arguments)
+        .output()
+        .map_err(|error| format!("无法启动 CCS：{error}"))
+}
+
+fn run_strict_ccs_link(gmake: &Path, build_dir: &Path, temp: &Path) -> Result<Output, String> {
+    let makefile = fs::read_to_string(build_dir.join("makefile"))
+        .map_err(|error| format!("无法读取 CCS makefile：{error}"))?;
+    let (patched, target, artifacts) = strict_makefile(&makefile)?;
+    let strict_makefile = temp.join("strict-validation.mk");
+    fs::write(&strict_makefile, patched).map_err(|error| error.to_string())?;
+    let output = Command::new(gmake)
+        .args(["-f"])
+        .arg(&strict_makefile)
+        .arg(&target)
+        .args(["-r", "-O"])
+        .current_dir(build_dir)
+        .output()
+        .map_err(|error| format!("无法启动 CCS 严格链接：{error}"));
+    let _ = fs::remove_file(&strict_makefile);
+    for artifact in artifacts {
+        let _ = fs::remove_file(build_dir.join(artifact));
+    }
+    output
+}
+
+fn strict_makefile(makefile: &str) -> Result<(String, String, Vec<String>), String> {
+    let target = makefile
+        .lines()
+        .find_map(|line| {
+            let (target, dependencies) = line.split_once(':')?;
+            (dependencies.contains("$(OBJS)") && target.trim().ends_with(".out"))
+                .then(|| target.trim().to_string())
+        })
+        .ok_or("CCS makefile 中未找到链接目标")?;
+    if !makefile.contains("$(ORDERED_OBJS)") || !makefile.contains("-Wl,--rom_model") {
+        return Err("CCS makefile 中未找到可复用的 TI 链接命令".into());
+    }
+    let stem = target.trim_end_matches(".out");
+    let strict_stem = "ccs2keil-strict-validation";
+    let strict_target = format!("{strict_stem}.out");
+    let map = format!("{strict_stem}.map");
+    let xml = format!("{strict_stem}_linkInfo.xml");
+    let patched = makefile
+        .replace(&target, &strict_target)
+        .replace(&format!("{stem}.map"), &map)
+        .replace(&format!("{stem}_linkInfo.xml"), &xml)
+        .replacen(
+            "-Wl,--rom_model",
+            "-Wl,--unused_section_elimination=off -Wl,--rom_model",
+            1,
+        );
+    Ok((
+        patched,
+        strict_target.clone(),
+        vec![strict_target, map, xml],
+    ))
+}
+
+fn validate_keil_build(
+    keil_path: &Path,
+    project_path: &Path,
+) -> Result<BuildValidationReport, String> {
+    let uv4 = locate_uv4(keil_path)?;
+    let project = if project_path.is_file() {
+        project_path.to_path_buf()
+    } else {
+        find_project_file(project_path, "uvprojx", 3)?.ok_or("Keil 工程中未找到 .uvprojx")?
+    };
+    let log_path = project
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join("ccs2keil-keil-build.log");
+    let _ = fs::remove_file(&log_path);
+    Command::new(&uv4)
+        .arg("-b")
+        .arg(&project)
+        .arg("-o")
+        .arg(&log_path)
+        .status()
+        .map_err(|error| format!("无法启动 Keil：{error}"))?;
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let log = loop {
+        if let Ok(log) = fs::read_to_string(&log_path) {
+            if log.contains("Build Time Elapsed:") {
+                break log;
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err("等待 Keil 构建日志超时".into());
+        }
+        thread::sleep(Duration::from_millis(200));
+    };
+    let success = keil_log_succeeded(&log);
+    Ok(BuildValidationReport {
+        success,
+        summary: if success {
+            "Keil 构建通过".into()
+        } else {
+            "Keil 构建失败".into()
+        },
+        log,
+        log_path: Some(log_path.to_string_lossy().into_owned()),
+        validated_project_path: None,
+        cleanup_path: None,
+    })
+}
+
+fn keil_log_succeeded(log: &str) -> bool {
+    log.lines().any(|line| line.contains(" - 0 Error(s),"))
+}
+
+fn locate_ccs_server(selected: &Path) -> Result<PathBuf, String> {
+    locate_tool(
+        selected,
+        "CCS",
+        &[
+            "ccs-serverc.exe",
+            "eclipse/ccs-serverc.exe",
+            "../eclipse/ccs-serverc.exe",
+        ],
+    )
+}
+
+fn locate_uv4(selected: &Path) -> Result<PathBuf, String> {
+    locate_tool(selected, "Keil", &["UV4.exe", "UV4/UV4.exe"])
+}
+
+fn locate_tool(selected: &Path, name: &str, candidates: &[&str]) -> Result<PathBuf, String> {
+    if selected.is_file() {
+        return Ok(selected.to_path_buf());
+    }
+    for candidate in candidates {
+        let path = selected.join(candidate);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    Err(format!(
+        "{name} 路径无效：未找到 {}",
+        candidates.join(" 或 ")
+    ))
+}
+
+fn find_ccs_build_dir(root: &Path, depth: usize) -> Result<Option<PathBuf>, String> {
+    fn visit(
+        root: &Path,
+        depth: usize,
+        best: &mut Option<(SystemTime, PathBuf)>,
+    ) -> Result<(), String> {
+        let makefile = root.join("makefile");
+        if makefile.is_file() && root.join("ccsObjs.opt").is_file() {
+            let modified = makefile
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            if best
+                .as_ref()
+                .map_or(true, |(current, _)| modified > *current)
+            {
+                *best = Some((modified, root.to_path_buf()));
+            }
+        }
+        if depth == 0 || !root.is_dir() {
+            return Ok(());
+        }
+        for entry in fs::read_dir(root).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_dir()
+            {
+                visit(&entry.path(), depth - 1, best)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut best = None;
+    visit(root, depth, &mut best)?;
+    Ok(best.map(|(_, path)| path))
+}
+
+fn unique_temp_dir(name: &str) -> PathBuf {
+    let id = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!("ccs2keil-{name}-{id}"))
+}
+
+fn output_text(output: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 pub fn convert_project(request: &ConversionRequest) -> Result<ConversionReport, String> {
@@ -1529,5 +1921,63 @@ void SYSCFG_DL_init(void);"#,
             .iter()
             .any(|path| path.ends_with("empty.c")));
         fs::remove_dir_all(output.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn makes_a_separate_strict_ccs_link_target() {
+        let makefile = r#"
+demo.out: $(OBJS) $(GEN_CMDS)
+	"tiarmclang.exe" -Wl,-m"demo.map" -Wl,--xml_link_info="demo_linkInfo.xml" -Wl,--rom_model -o "demo.out" $(ORDERED_OBJS)
+"#;
+        let (patched, target, artifacts) = strict_makefile(makefile).unwrap();
+
+        assert_eq!(target, "ccs2keil-strict-validation.out");
+        assert!(patched.contains("-Wl,--unused_section_elimination=off"));
+        assert!(patched.contains("ccs2keil-strict-validation.map"));
+        assert!(patched.contains("ccs2keil-strict-validation_linkInfo.xml"));
+        assert!(!patched.contains("-o \"demo.out\""));
+        assert_eq!(artifacts.len(), 3);
+    }
+
+    #[test]
+    fn judges_keil_build_from_its_log_not_process_exit_code() {
+        assert!(keil_log_succeeded(
+            r#"".\Objects\demo.axf" - 0 Error(s), 0 Warning(s).
+Build Time Elapsed: 00:00:01"#
+        ));
+        assert!(!keil_log_succeeded(
+            r#"Error: L6218E: Undefined symbol TrackN.
+".\Objects\demo.axf" - 1 Error(s), 0 Warning(s).
+Build Time Elapsed: 00:00:01"#
+        ));
+    }
+
+    #[test]
+    fn accepts_ccs_and_keil_install_roots() {
+        let root = temp_dir("toolchains");
+        let ccs = root.join("ccs");
+        let theia = ccs.join("theia");
+        let keil = root.join("Keil_v5");
+        fs::create_dir_all(ccs.join("eclipse")).unwrap();
+        fs::create_dir_all(&theia).unwrap();
+        fs::create_dir_all(keil.join("UV4")).unwrap();
+        fs::write(ccs.join("eclipse/ccs-serverc.exe"), "fixture").unwrap();
+        fs::write(keil.join("UV4/UV4.exe"), "fixture").unwrap();
+
+        validate_toolchains(&theia, &keil).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_cleans_its_own_validation_directory() {
+        let validation = unique_temp_dir("ccs-validation");
+        fs::create_dir_all(&validation).unwrap();
+        fs::write(validation.join("fixture"), "test").unwrap();
+        cleanup_validation_copy(&validation).unwrap();
+        assert!(!validation.exists());
+
+        let unrelated = temp_dir("unrelated");
+        assert!(cleanup_validation_copy(&unrelated).is_err());
+        fs::remove_dir_all(unrelated).unwrap();
     }
 }
