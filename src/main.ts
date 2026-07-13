@@ -144,6 +144,7 @@ app.innerHTML = `
           <label>
             <span>CMSIS Pack（CCS → Keil 必需）</span>
             <div class="path-control"><input id="pack-path" readonly placeholder="自动检测已安装 Pack，或选择 .pack/.pdsc" /><button id="pick-pack">浏览</button></div>
+            <small class="field-hint">常见位置：&lt;Keil&gt;\ARM\PACK\TexasInstruments 或 &lt;Keil&gt;\ARM\Packs\TexasInstruments；也可直接选择 .pack/.pdsc 文件。</small>
           </label>
           <label>
             <span>CCS 安装目录（可选）</span>

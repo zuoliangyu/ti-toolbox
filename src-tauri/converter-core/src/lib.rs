@@ -346,18 +346,24 @@ fn discover_pack(
     if selected.as_ref().is_some_and(|value| value.installed) {
         return selected;
     }
-    let pack_root = keil_executable
+    let pack_roots = keil_executable
         .and_then(Path::parent)
         .and_then(Path::parent)
-        .map(|path| path.join("ARM").join("PACK"));
-    pack_root
-        .as_ref()
-        .and_then(|root| find_pack_candidate(&root.join("TexasInstruments"), device, true, 4))
+        .map(|path| {
+            [
+                path.join("ARM").join("PACK"),
+                path.join("ARM").join("Packs"),
+            ]
+        })
+        .unwrap_or_default();
+    pack_roots
+        .iter()
+        .find_map(|root| find_pack_candidate(&root.join("TexasInstruments"), device, true, 4))
         .or(selected)
         .or_else(|| {
-            pack_root
-                .as_ref()
-                .and_then(|root| find_pack_candidate(&root.join(".Web"), device, false, 1))
+            pack_roots
+                .iter()
+                .find_map(|root| find_pack_candidate(&root.join(".Web"), device, false, 1))
         })
 }
 
@@ -415,8 +421,13 @@ fn find_pack_candidate(
 }
 
 fn is_installed_pack_path(path: &Path) -> bool {
-    let text = path.to_string_lossy().to_ascii_lowercase();
-    text.contains(r"\arm\pack\") && !text.contains(r"\pack\.")
+    let text = path
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    (text.contains(r"\arm\pack\") || text.contains(r"\arm\packs\"))
+        && !text.contains(r"\pack\.")
+        && !text.contains(r"\packs\.")
 }
 
 fn pack_download_url(name: &str) -> String {
@@ -2706,7 +2717,7 @@ mod tests {
         let project = root.join("project");
         let sdk = root.join("mspm0_sdk_2_10_00_04");
         let keil = root.join("Keil_v5");
-        let pack = keil.join("ARM/PACK/TexasInstruments/MSPM0G1X0X_G3X0X_DFP/1.3.1");
+        let pack = keil.join("ARM/Packs/TexasInstruments/MSPM0G1X0X_G3X0X_DFP/1.3.1");
         fs::create_dir_all(&project).unwrap();
         fs::create_dir_all(sdk.join(".metadata")).unwrap();
         fs::create_dir_all(keil.join("UV4")).unwrap();
@@ -2761,7 +2772,7 @@ mod tests {
             Some("https://www.keil.arm.com/packs/mspm0g1x0x_g3x0x_dfp-texasinstruments/boards/")
         );
 
-        fs::remove_dir_all(keil.join("ARM/PACK/TexasInstruments")).unwrap();
+        fs::remove_dir_all(keil.join("ARM/Packs/TexasInstruments")).unwrap();
         let catalog = discover_environment(&request).unwrap();
         assert!(!catalog.pack_installed);
         assert_eq!(catalog.pack_version.as_deref(), Some("9.9.9"));

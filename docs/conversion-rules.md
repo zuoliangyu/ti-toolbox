@@ -68,7 +68,7 @@
 
 - CCS → Keil 需要 SDK 和 Pack 元数据；CCS 只负责源构建验证，Keil 只负责目标构建验证。
 - Keil → CCS 只强制要求 SDK，Pack 不参与 ProjectSpec 生成。
-- 已安装 Pack 只从 `ARM/PACK/TexasInstruments` 识别；`.Web` PDSC 可提供 PackID 和官方下载链接，但不视为已安装。
+- 已安装 Pack 从 `ARM/PACK/TexasInstruments` 或 `ARM/Packs/TexasInstruments` 识别；`.Web` PDSC 可提供 PackID 和官方下载链接，但不视为已安装。
 - 不自动下载 Pack，也不调用 Pack Installer。
 - 配置 Keil SysConfig 前必须由用户确认；工具更新 SDK 的 `syscfg.bat` 和 `MSPM0_SDK_syscfg_menu_import.cfg`，并为首次修改保留 `.ccs2keil.bak`。
 - Keil Tools 配置优先复用命令相同的现有项；否则更新 CCS2KEIL 自有项或使用首个空闲槽位，不覆盖其他工具。
