@@ -442,9 +442,16 @@ function renderBuildReport(container: HTMLElement, report: BuildValidationReport
   result.className = `validation-result ${report.success ? "success" : "error"}`;
   result.append(textBlock("strong", report.summary));
   if (report.logPath) result.append(textBlock("code", report.logPath));
+  if (!report.success) {
+    const excerpt = report.log.trimEnd().split(/\r?\n/).slice(-18).join("\n");
+    const errorLog = document.createElement("pre");
+    errorLog.className = "error-excerpt";
+    errorLog.textContent = excerpt || "构建工具未返回日志。";
+    result.append(textBlock("small", "错误附近日志（末尾 18 行）"), errorLog);
+  }
   const details = document.createElement("details");
   const summary = document.createElement("summary");
-  summary.textContent = "查看构建日志";
+  summary.textContent = "查看完整构建日志";
   const log = document.createElement("pre");
   log.textContent = report.log;
   details.append(summary, log);

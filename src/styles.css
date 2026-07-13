@@ -159,6 +159,7 @@ button:hover:not(:disabled) { border-color: #96add0; background: #f6f9fd; transf
 .validation-result code { font: 9px/1.4 "Cascadia Code", Consolas, monospace; overflow-wrap: anywhere; }
 .validation-result summary { cursor: pointer; font-size: 9px; font-weight: 650; }
 .validation-result pre { max-height: 260px; overflow: auto; margin: 7px 0 0; border-radius: 6px; padding: 8px; color: #cdd8e6; background: #172033; font: 9px/1.45 "Cascadia Code", Consolas, monospace; white-space: pre-wrap; }
+.validation-result .error-excerpt { max-height: 160px; border-left: 3px solid #e25a68; }
 .live-log { color: #40618d; background: #eef4fc; }
 
 .conversion-panel {
