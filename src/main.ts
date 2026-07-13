@@ -141,7 +141,7 @@ app.innerHTML = `
               <option value="in-place">原工程直接构建（更新 Debug/SysConfig）</option>
             </select>
           </label>
-          <p>无论选择哪种方式，都会在普通构建后执行一次保留死代码的严格链接。</p>
+          <p>建议转换前先执行“一键构建验证”，提前发现 CCS 普通构建可能掩盖的未定义符号；两种验证方式都会执行严格链接。</p>
         </div>
         <div class="inspection empty" id="inspection">工程解析与构建验证结果会显示在这里。</div>
       </section>
