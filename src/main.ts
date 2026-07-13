@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./styles.css";
 
@@ -9,6 +10,8 @@ interface ResourceInfo {
   packName: string;
   packVersion: string;
   devices: string[];
+  ccsExecutable: string;
+  keilExecutable: string;
 }
 
 interface ProjectFile {
@@ -104,6 +107,16 @@ app.innerHTML = `
             <span>Keil 安装目录</span>
             <div class="path-control"><input id="keil-path" readonly placeholder="例如 D:\\Keil_v5" /><button id="pick-keil">浏览</button></div>
           </label>
+          <label class="search-depth-field">
+            <span>工具目录向下搜索层级</span>
+            <select id="tool-search-depth">
+              <option value="0">0 级（仅当前目录）</option>
+              <option value="1">1 级</option>
+              <option value="2">2 级（默认）</option>
+              <option value="3">3 级</option>
+              <option value="4">4 级（最大）</option>
+            </select>
+          </label>
         </div>
         <div class="inline-result muted" id="resource-result"><span></span><p>选择资源后会自动验证版本和器件支持。</p></div>
       </section>
@@ -172,17 +185,27 @@ const convertButton = element<HTMLButtonElement>("convert");
 const convertCaption = element<HTMLElement>("convert-caption");
 const validateSourceButton = element<HTMLButtonElement>("validate-source");
 const ccsBuildMode = element<HTMLSelectElement>("ccs-build-mode");
+const toolSearchDepth = element<HTMLSelectElement>("tool-search-depth");
 
 let resources: ResourceInfo | null = null;
 let inspection: ProjectInspection | null = null;
 let sourceValidatedPath = "";
 let conversionProjectPath = "";
 let sourceCleanupPath: string | null = null;
+let activeBuildOperation = "";
+let liveLogView: HTMLPreElement | null = null;
 
 sdkInput.value = localStorage.getItem("ccs2keil.sdkPath") ?? "";
 packInput.value = localStorage.getItem("ccs2keil.packPath") ?? "";
 ccsInput.value = localStorage.getItem("ccs2keil.ccsPath") ?? "";
 keilInput.value = localStorage.getItem("ccs2keil.keilPath") ?? "";
+toolSearchDepth.value = localStorage.getItem("ccs2keil.toolSearchDepth") ?? "2";
+
+void listen<[string, string]>("build-log", ({ payload: [operationId, chunk] }) => {
+  if (operationId !== activeBuildOperation || !liveLogView) return;
+  liveLogView.textContent += chunk;
+  liveLogView.scrollTop = liveLogView.scrollHeight;
+});
 
 element("pick-sdk").addEventListener("click", async () => {
   const selected = await open({ directory: true, multiple: false, defaultPath: sdkInput.value || undefined });
@@ -232,6 +255,13 @@ element("pick-keil").addEventListener("click", async () => {
   }
 });
 
+toolSearchDepth.addEventListener("change", async () => {
+  await discardSourceValidation();
+  localStorage.setItem("ccs2keil.toolSearchDepth", toolSearchDepth.value);
+  resources = null;
+  await validateResources();
+});
+
 element("pick-project").addEventListener("click", async () => {
   const selected = await open({ directory: true, multiple: false, defaultPath: projectInput.value || undefined });
   if (typeof selected === "string") {
@@ -272,9 +302,10 @@ async function validateResources(): Promise<void> {
       packPath: packInput.value,
       ccsPath: ccsInput.value,
       keilPath: keilInput.value,
+      searchDepth: Number(toolSearchDepth.value),
     });
     resourceResult.className = "inline-result success";
-    resourceResult.replaceChildren(resultDot(), textBlock("p", `SDK ${resources.sdkVersion} · ${resources.packName} ${resources.packVersion} · CCS/Keil 可用 · 支持 ${resources.devices.length} 个器件`));
+    resourceResult.replaceChildren(resultDot(), textBlock("p", `SDK ${resources.sdkVersion} · ${resources.packName} ${resources.packVersion} · 支持 ${resources.devices.length} 个器件\nCCS ${resources.ccsExecutable}\nKeil ${resources.keilExecutable}`));
     markStep("resource", "ready");
     showStatus("开发资源验证通过", "现在可以选择需要转换的工程。");
   } catch (error) {
@@ -321,12 +352,7 @@ async function validateSourceProject(): Promise<void> {
   if (inspection.kind === "ccs" && ccsInPlace && !window.confirm("原工程直接构建会执行 CCS Clean + Full Build，并更新源工程的 Debug、SysConfig 等构建产物。是否继续？")) return;
   setBusy(true, `正在执行 ${kindLabel(inspection.kind)} 构建验证`, inspection.kind === "ccs" ? `${ccsInPlace ? "在原工程" : "在临时副本"}执行 Clean + Full Build，再关闭未使用 section 消除进行严格链接…` : "调用 Keil 构建源工程…");
   try {
-    const report = await invoke<BuildValidationReport>("validate_project_build", {
-      projectPath: projectInput.value,
-      ccsPath: ccsInput.value,
-      keilPath: keilInput.value,
-      ccsInPlace,
-    });
+    const report = await runBuildValidation(projectInput.value, ccsInPlace);
     renderBuildReport(inspectionView, report);
     sourceValidatedPath = report.success ? projectInput.value : "";
     conversionProjectPath = report.validatedProjectPath ?? projectInput.value;
@@ -359,12 +385,7 @@ async function convertProject(): Promise<void> {
     showStatus(`转换完成，正在验证 ${kindLabel(report.targetKind)} 工程`, "调用目标工具链进行真实构建…");
     let validation: BuildValidationReport;
     try {
-      validation = await invoke<BuildValidationReport>("validate_project_build", {
-        projectPath: report.outputPath,
-        ccsPath: ccsInput.value,
-        keilPath: keilInput.value,
-        ccsInPlace: false,
-      });
+      validation = await runBuildValidation(report.outputPath, false);
     } catch (error) {
       statusView.className = "status error report";
       statusView.replaceChildren(
@@ -429,6 +450,30 @@ function renderBuildReport(container: HTMLElement, report: BuildValidationReport
   details.append(summary, log);
   result.append(details);
   container.append(result);
+}
+
+async function runBuildValidation(projectPath: string, ccsInPlace: boolean): Promise<BuildValidationReport> {
+  const operationId = crypto.randomUUID();
+  activeBuildOperation = operationId;
+  const panel = document.createElement("div");
+  panel.className = "validation-result live-log";
+  panel.append(textBlock("strong", "实时构建日志"));
+  liveLogView = document.createElement("pre");
+  panel.append(liveLogView);
+  statusView.append(panel);
+  try {
+    return await invoke<BuildValidationReport>("validate_project_build", {
+      projectPath,
+      ccsPath: ccsInput.value,
+      keilPath: keilInput.value,
+      ccsInPlace,
+      searchDepth: Number(toolSearchDepth.value),
+      operationId,
+    });
+  } finally {
+    activeBuildOperation = "";
+    liveLogView = null;
+  }
 }
 
 function metric(label: string, value: string): HTMLElement {

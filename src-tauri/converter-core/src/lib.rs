@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
-    io::Read,
+    io::{BufRead, BufReader, Read},
     path::{Component, Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, ExitStatus, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -78,10 +79,44 @@ pub struct BuildValidationReport {
     pub cleanup_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidatedResources {
+    pub sdk_version: String,
+    pub pack_name: String,
+    pub pack_version: String,
+    pub devices: Vec<String>,
+    pub ccs_executable: String,
+    pub keil_executable: String,
+}
+
+struct CommandResult {
+    status: ExitStatus,
+    log: String,
+}
+
 pub fn validate_toolchains(ccs_path: &Path, keil_path: &Path) -> Result<(), String> {
-    locate_ccs_server(ccs_path)?;
-    locate_uv4(keil_path)?;
+    locate_toolchains(ccs_path, keil_path, 2)?;
     Ok(())
+}
+
+pub fn validate_development_resources(
+    sdk_path: &Path,
+    pack_path: &Path,
+    ccs_path: &Path,
+    keil_path: &Path,
+    search_depth: u8,
+) -> Result<ValidatedResources, String> {
+    let resources = validate_resources(sdk_path, pack_path)?;
+    let (ccs, keil) = locate_toolchains(ccs_path, keil_path, search_depth)?;
+    Ok(ValidatedResources {
+        sdk_version: resources.sdk_version,
+        pack_name: resources.pack_name,
+        pack_version: resources.pack_version,
+        devices: resources.devices,
+        ccs_executable: ccs.to_string_lossy().into_owned(),
+        keil_executable: keil.to_string_lossy().into_owned(),
+    })
 }
 
 pub fn validate_project_build(
@@ -90,9 +125,34 @@ pub fn validate_project_build(
     keil_path: &Path,
     ccs_in_place: bool,
 ) -> Result<BuildValidationReport, String> {
+    validate_project_build_with_progress(project_path, ccs_path, keil_path, ccs_in_place, 2, |_| {})
+}
+
+pub fn validate_project_build_with_progress<F>(
+    project_path: &Path,
+    ccs_path: &Path,
+    keil_path: &Path,
+    ccs_in_place: bool,
+    search_depth: u8,
+    mut progress: F,
+) -> Result<BuildValidationReport, String>
+where
+    F: FnMut(&str),
+{
+    if search_depth > 4 {
+        return Err("工具目录搜索层级只能是 0–4".into());
+    }
     match detect_project(project_path)? {
-        ProjectKind::Ccs => validate_ccs_build(ccs_path, project_path, ccs_in_place),
-        ProjectKind::Keil => validate_keil_build(keil_path, project_path),
+        ProjectKind::Ccs => validate_ccs_build(
+            ccs_path,
+            project_path,
+            ccs_in_place,
+            search_depth,
+            &mut progress,
+        ),
+        ProjectKind::Keil => {
+            validate_keil_build(keil_path, project_path, search_depth, &mut progress)
+        }
     }
 }
 
@@ -118,8 +178,10 @@ fn validate_ccs_build(
     ccs_path: &Path,
     project_path: &Path,
     ccs_in_place: bool,
+    search_depth: u8,
+    progress: &mut dyn FnMut(&str),
 ) -> Result<BuildValidationReport, String> {
-    let server = locate_ccs_server(ccs_path)?;
+    let server = locate_ccs_server(ccs_path, search_depth)?;
     let ccs_root = server
         .parent()
         .and_then(Path::parent)
@@ -153,17 +215,20 @@ fn validate_ccs_build(
         if uses_temp_project {
             import_arguments.push("-ccs.copyIntoWorkspace");
         }
+        progress("===== 导入 CCS 工程 =====\n");
         let import = run_ccs(
             &server,
             &metadata,
             &workspace,
             "com.ti.ccs.apps.importProject",
             &import_arguments,
+            progress,
         )?;
         if !import.status.success() {
-            return Err(format!("CCS 导入工程失败：\n{}", output_text(&import)));
+            return Err(format!("CCS 导入工程失败：\n{}", import.log));
         }
 
+        progress("\n===== CCS Clean Build =====\n");
         let clean = run_ccs(
             &server,
             &metadata,
@@ -176,7 +241,9 @@ fn validate_ccs_build(
                 "clean",
                 "-ccs.listProblems",
             ],
+            progress,
         )?;
+        progress("\n===== CCS Full Build =====\n");
         let full = run_ccs(
             &server,
             &metadata,
@@ -189,11 +256,11 @@ fn validate_ccs_build(
                 "full",
                 "-ccs.listProblems",
             ],
+            progress,
         )?;
-        let mut log = format!("{}\n{}", output_text(&clean), output_text(&full));
-        let normal_success = clean.status.success()
-            && full.status.success()
-            && log.contains("0 out of 1 projects have errors");
+        let normal_success = clean.status.success() && full.status.success();
+        let mut log = format!("{}\n{}", clean.log, full.log);
+        let normal_success = normal_success && log.contains("0 out of 1 projects have errors");
         if !normal_success {
             return Ok(BuildValidationReport {
                 success: false,
@@ -212,11 +279,15 @@ fn validate_ccs_build(
         };
         let build_dir = find_ccs_build_dir(&built_project, 4)?
             .ok_or("CCS 构建成功，但未找到生成的 makefile/ccsObjs.opt")?;
-        let strict = run_strict_ccs_link(&gmake, &build_dir, &temp)?;
-        let strict_log = output_text(&strict);
+        progress("\n===== CCS 严格链接（保留未使用 section）=====\n");
+        let strict = run_strict_ccs_link(&gmake, &build_dir, &temp, progress)?;
+        let CommandResult {
+            status,
+            log: strict_log,
+        } = strict;
         log.push_str("\n\n===== CCS 严格链接（保留未使用 section）=====\n");
         log.push_str(&strict_log);
-        let success = strict.status.success();
+        let success = status.success();
         Ok(BuildValidationReport {
             success,
             summary: if success {
@@ -249,31 +320,38 @@ fn run_ccs(
     workspace: &Path,
     application: &str,
     arguments: &[&str],
-) -> Result<Output, String> {
-    Command::new(server)
+    progress: &mut dyn FnMut(&str),
+) -> Result<CommandResult, String> {
+    let mut command = Command::new(server);
+    command
         .args(["-nosplash", "-data"])
         .arg(metadata)
         .args(["-application", application, "-ccs.launcher", "ccs2keil"])
         .arg("-ccs.defaultImportDestination")
         .arg(workspace)
-        .args(arguments)
-        .output()
-        .map_err(|error| format!("无法启动 CCS：{error}"))
+        .args(arguments);
+    run_streaming_command(&mut command, progress).map_err(|error| format!("无法启动 CCS：{error}"))
 }
 
-fn run_strict_ccs_link(gmake: &Path, build_dir: &Path, temp: &Path) -> Result<Output, String> {
+fn run_strict_ccs_link(
+    gmake: &Path,
+    build_dir: &Path,
+    temp: &Path,
+    progress: &mut dyn FnMut(&str),
+) -> Result<CommandResult, String> {
     let makefile = fs::read_to_string(build_dir.join("makefile"))
         .map_err(|error| format!("无法读取 CCS makefile：{error}"))?;
     let (patched, target, artifacts) = strict_makefile(&makefile)?;
     let strict_makefile = temp.join("strict-validation.mk");
     fs::write(&strict_makefile, patched).map_err(|error| error.to_string())?;
-    let output = Command::new(gmake)
+    let mut command = Command::new(gmake);
+    command
         .args(["-f"])
         .arg(&strict_makefile)
         .arg(&target)
         .args(["-r", "-O"])
-        .current_dir(build_dir)
-        .output()
+        .current_dir(build_dir);
+    let output = run_streaming_command(&mut command, progress)
         .map_err(|error| format!("无法启动 CCS 严格链接：{error}"));
     let _ = fs::remove_file(&strict_makefile);
     for artifact in artifacts {
@@ -318,8 +396,10 @@ fn strict_makefile(makefile: &str) -> Result<(String, String, Vec<String>), Stri
 fn validate_keil_build(
     keil_path: &Path,
     project_path: &Path,
+    search_depth: u8,
+    progress: &mut dyn FnMut(&str),
 ) -> Result<BuildValidationReport, String> {
-    let uv4 = locate_uv4(keil_path)?;
+    let uv4 = locate_uv4(keil_path, search_depth)?;
     let project = if project_path.is_file() {
         project_path.to_path_buf()
     } else {
@@ -330,6 +410,7 @@ fn validate_keil_build(
         .unwrap_or(Path::new("."))
         .join("ccs2keil-keil-build.log");
     let _ = fs::remove_file(&log_path);
+    progress("===== Keil Build =====\n");
     Command::new(&uv4)
         .arg("-b")
         .arg(&project)
@@ -339,8 +420,18 @@ fn validate_keil_build(
         .map_err(|error| format!("无法启动 Keil：{error}"))?;
 
     let deadline = Instant::now() + Duration::from_secs(120);
+    let mut emitted = 0;
     let log = loop {
-        if let Ok(log) = fs::read_to_string(&log_path) {
+        if let Ok(bytes) = fs::read(&log_path) {
+            if bytes.len() < emitted {
+                emitted = 0;
+            }
+            if bytes.len() > emitted {
+                let chunk = String::from_utf8_lossy(&bytes[emitted..]);
+                progress(&chunk);
+                emitted = bytes.len();
+            }
+            let log = String::from_utf8_lossy(&bytes).into_owned();
             if log.contains("Build Time Elapsed:") {
                 break log;
             }
@@ -369,36 +460,101 @@ fn keil_log_succeeded(log: &str) -> bool {
     log.lines().any(|line| line.contains(" - 0 Error(s),"))
 }
 
-fn locate_ccs_server(selected: &Path) -> Result<PathBuf, String> {
+fn locate_toolchains(
+    ccs_path: &Path,
+    keil_path: &Path,
+    search_depth: u8,
+) -> Result<(PathBuf, PathBuf), String> {
+    if search_depth > 4 {
+        return Err("工具目录搜索层级只能是 0–4".into());
+    }
+    Ok((
+        locate_ccs_server(ccs_path, search_depth)?,
+        locate_uv4(keil_path, search_depth)?,
+    ))
+}
+
+fn locate_ccs_server(selected: &Path, search_depth: u8) -> Result<PathBuf, String> {
     locate_tool(
         selected,
         "CCS",
-        &[
-            "ccs-serverc.exe",
-            "eclipse/ccs-serverc.exe",
-            "../eclipse/ccs-serverc.exe",
-        ],
+        "ccs-serverc.exe",
+        &["../eclipse/ccs-serverc.exe"],
+        search_depth,
     )
 }
 
-fn locate_uv4(selected: &Path) -> Result<PathBuf, String> {
-    locate_tool(selected, "Keil", &["UV4.exe", "UV4/UV4.exe"])
+fn locate_uv4(selected: &Path, search_depth: u8) -> Result<PathBuf, String> {
+    locate_tool(selected, "Keil", "UV4.exe", &[], search_depth)
 }
 
-fn locate_tool(selected: &Path, name: &str, candidates: &[&str]) -> Result<PathBuf, String> {
+fn locate_tool(
+    selected: &Path,
+    name: &str,
+    file_name: &str,
+    special_candidates: &[&str],
+    search_depth: u8,
+) -> Result<PathBuf, String> {
     if selected.is_file() {
-        return Ok(selected.to_path_buf());
+        return selected
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(file_name))
+            .then(|| selected.to_path_buf())
+            .ok_or_else(|| format!("{name} 路径无效：请选择 {file_name} 或其上级目录"));
     }
-    for candidate in candidates {
+    if !selected.is_dir() {
+        return Err(format!("{name} 路径不存在：{}", selected.display()));
+    }
+    for candidate in special_candidates {
         let path = selected.join(candidate);
         if path.is_file() {
             return Ok(path);
         }
     }
-    Err(format!(
-        "{name} 路径无效：未找到 {}",
-        candidates.join(" 或 ")
-    ))
+    find_tool_bounded(selected, file_name, search_depth)?.ok_or_else(|| {
+        format!(
+            "{name} 路径无效：在 {} 向下 {search_depth} 级未找到 {file_name}",
+            selected.display()
+        )
+    })
+}
+
+fn find_tool_bounded(root: &Path, file_name: &str, depth: u8) -> Result<Option<PathBuf>, String> {
+    let mut directories = vec![root.to_path_buf()];
+    for level in 0..=depth {
+        directories.sort();
+        let mut next = Vec::new();
+        for directory in directories {
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if directory == root => {
+                    return Err(format!("无法搜索工具目录 {}：{error}", directory.display()));
+                }
+                Err(_) => continue,
+            };
+            let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_file()
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(file_name))
+                {
+                    return Ok(Some(entry.path()));
+                }
+                if level < depth && file_type.is_dir() {
+                    next.push(entry.path());
+                }
+            }
+        }
+        directories = next;
+    }
+    Ok(None)
 }
 
 fn find_ccs_build_dir(root: &Path, depth: usize) -> Result<Option<PathBuf>, String> {
@@ -449,12 +605,55 @@ fn unique_temp_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("ccs2keil-{name}-{id}"))
 }
 
-fn output_text(output: &Output) -> String {
-    format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
+fn run_streaming_command(
+    command: &mut Command,
+    progress: &mut dyn FnMut(&str),
+) -> Result<CommandResult, String> {
+    fn forward<R: Read + Send + 'static>(stream: R, sender: mpsc::Sender<Vec<u8>>) {
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stream);
+            loop {
+                let mut chunk = Vec::new();
+                match reader.read_until(b'\n', &mut chunk) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if sender.send(chunk).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(format!("读取构建日志失败：{error}\n").into_bytes());
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let (sender, receiver) = mpsc::channel();
+    forward(
+        child.stdout.take().ok_or("无法读取构建标准输出")?,
+        sender.clone(),
+    );
+    forward(
+        child.stderr.take().ok_or("无法读取构建错误输出")?,
+        sender.clone(),
+    );
+    drop(sender);
+
+    let mut log = String::new();
+    for bytes in receiver {
+        let chunk = String::from_utf8_lossy(&bytes);
+        progress(&chunk);
+        log.push_str(&chunk);
+    }
+    let status = child.wait().map_err(|error| error.to_string())?;
+    Ok(CommandResult { status, log })
 }
 
 pub fn convert_project(request: &ConversionRequest) -> Result<ConversionReport, String> {
@@ -1965,6 +2164,28 @@ Build Time Elapsed: 00:00:01"#
         fs::write(keil.join("UV4/UV4.exe"), "fixture").unwrap();
 
         validate_toolchains(&theia, &keil).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn searches_tool_directories_only_to_the_selected_depth() {
+        let root = temp_dir("nested-toolchain");
+        let nested = root.join("one/two/three");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("UV4.exe"), "fixture").unwrap();
+
+        assert!(locate_uv4(&root, 0).is_err());
+        assert!(locate_uv4(&root, 2).is_err());
+        assert_eq!(locate_uv4(&root, 3).unwrap(), nested.join("UV4.exe"));
+        assert!(locate_toolchains(&root, &root, 5).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reports_an_unreadable_tool_search_root() {
+        let root = temp_dir("missing-tool-root");
+        let missing = root.join("not-created");
+        assert!(find_tool_bounded(&missing, "UV4.exe", 2).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -1,7 +1,9 @@
 use ccs2keil_core::{
-    BuildValidationReport, ConversionReport, ConversionRequest, ProjectInspection, ResourceInfo,
+    BuildValidationReport, ConversionReport, ConversionRequest, ProjectInspection,
+    ValidatedResources,
 };
 use std::path::Path;
+use tauri::Emitter;
 
 #[tauri::command]
 fn validate_resources(
@@ -9,9 +11,15 @@ fn validate_resources(
     pack_path: String,
     ccs_path: String,
     keil_path: String,
-) -> Result<ResourceInfo, String> {
-    ccs2keil_core::validate_toolchains(Path::new(&ccs_path), Path::new(&keil_path))?;
-    ccs2keil_core::validate_resources(Path::new(&sdk_path), Path::new(&pack_path))
+    search_depth: u8,
+) -> Result<ValidatedResources, String> {
+    ccs2keil_core::validate_development_resources(
+        Path::new(&sdk_path),
+        Path::new(&pack_path),
+        Path::new(&ccs_path),
+        Path::new(&keil_path),
+        search_depth,
+    )
 }
 
 #[tauri::command]
@@ -26,17 +34,24 @@ fn convert_project(request: ConversionRequest) -> Result<ConversionReport, Strin
 
 #[tauri::command]
 async fn validate_project_build(
+    app: tauri::AppHandle,
     project_path: String,
     ccs_path: String,
     keil_path: String,
     ccs_in_place: bool,
+    search_depth: u8,
+    operation_id: String,
 ) -> Result<BuildValidationReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        ccs2keil_core::validate_project_build(
+        ccs2keil_core::validate_project_build_with_progress(
             Path::new(&project_path),
             Path::new(&ccs_path),
             Path::new(&keil_path),
             ccs_in_place,
+            search_depth,
+            |chunk| {
+                let _ = app.emit("build-log", (operation_id.as_str(), chunk));
+            },
         )
     })
     .await
