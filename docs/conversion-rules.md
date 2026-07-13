@@ -22,7 +22,7 @@
    DriverLib 链接参数会去掉 Rust `canonicalize` 产生的 `\\?\` 前缀并使用双引号，支持 `D:\ccs sdk\...` 等含空格路径及旧版 Arm Linker。
 5. 从 Pack PDSC 写入 `PackID`。
 6. 不复制 CCS 启动文件、`.cmd`、`.ccxml` 和构建输出目录。
-7. 遵循 `.cproject` 的 `sourceEntries/excluding`，不读取或迁移 CCS 已排除构建的文件和目录。
+7. 遵循 `.cproject` 的 `sourceEntries/excluding`：不迁移已排除构建的 C/C++、汇编和 SysConfig 文件，但保留头文件及其 Keil Include Path，因为 CCS 的预处理器仍可从这些目录引用头文件。
 8. 例外读取 `Debug/syscfg` 或 `Release/syscfg` 中的 `ti_msp_dl_config.c/h`；生成文件缺失时拒绝转换。
 9. 在输出副本中为 `SYSCONFIG_WEAK` 补充 ArmClang 条件，源工程生成文件保持不变。
 

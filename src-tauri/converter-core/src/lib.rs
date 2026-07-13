@@ -2325,9 +2325,6 @@ fn collect_local_sources(
             .unwrap_or(&entry.path())
             .to_string_lossy()
             .replace('\\', "/");
-        if is_ccs_source_excluded(&relative, excluded_sources) {
-            continue;
-        }
         if file_type.is_dir() {
             if !SKIPPED.contains(&entry.file_name().to_string_lossy().as_ref()) {
                 collect_local_sources(root, &entry.path(), excluded_sources, files)?;
@@ -2337,6 +2334,9 @@ fn collect_local_sources(
         let Some(kind) = source_type(&entry.path()) else {
             continue;
         };
+        if kind != "header" && is_ccs_source_excluded(&relative, excluded_sources) {
+            continue;
+        }
         files.push(ProjectFile {
             path: relative,
             group: source_group(kind).into(),
@@ -2871,6 +2871,11 @@ Mex1    REG_SZ    "D:\ti\ccs2100\sysconfig_1.26.2\nw\nw.exe" "D:\ti\ccs2100\sysc
             "void disabled(void) {}",
         )
         .unwrap();
+        fs::write(
+            root.join("Drivers/DISABLED/disabled.h"),
+            "void disabled(void);",
+        )
+        .unwrap();
         fs::write(root.join("Drivers/ACTIVE/active.c"), "void active(void) {}").unwrap();
 
         let result = inspect_project(&root).unwrap();
@@ -2882,6 +2887,10 @@ Mex1    REG_SZ    "D:\ti\ccs2100\sysconfig_1.26.2\nw\nw.exe" "D:\ti\ccs2100\sysc
             .files
             .iter()
             .any(|file| file.path.ends_with("disabled.c")));
+        assert!(result
+            .files
+            .iter()
+            .any(|file| file.path.ends_with("disabled.h")));
         fs::remove_dir_all(root).unwrap();
     }
 
