@@ -124,6 +124,7 @@ input:focus, select:focus { border-color: #77a5e9; box-shadow: 0 0 0 3px rgba(41
 .build-mode { display: grid; grid-template-columns: minmax(280px, .8fr) 1fr; align-items: end; gap: 14px; margin-top: 12px; }
 .build-mode select { width: 100%; }
 .build-mode p { margin: 0 0 2px; color: #8793a3; font-size: 9px; line-height: 1.5; }
+.build-recommendation { color: #b23b4c; font-weight: 700; }
 
 button {
   border: 1px solid #ced8e4;
