@@ -70,5 +70,6 @@
 - Keil → CCS 只强制要求 SDK，Pack 不参与 ProjectSpec 生成。
 - 已安装 Pack 从 `ARM/PACK/TexasInstruments` 或 `ARM/Packs/TexasInstruments` 识别；`.Web` PDSC 可提供 PackID 和官方下载链接，但不视为已安装。
 - 不自动下载 Pack，也不调用 Pack Installer。
-- 配置 Keil SysConfig 前必须由用户确认；工具更新 SDK 的 `syscfg.bat` 和 `MSPM0_SDK_syscfg_menu_import.cfg`，并为首次修改保留 `.ccs2keil.bak`。
-- Keil Tools 配置优先复用命令相同的现有项；否则更新 CCS2KEIL 自有项或使用首个空闲槽位，不覆盖其他工具。
+- Keil TI 环境配置无需先选择工程；自动检测 MSPM0 SDK、Keil 与带 `nw/nw.exe` 的图形化 SysConfig，Pack 继续由用户手动安装。CLI-only SysConfig 不视为可配置 Keil Tools 图形化入口。
+- 配置 Keil SysConfig 前必须由用户确认；工具更新 SDK 的 `syscfg.bat` 和 `MSPM0_SDK_syscfg_menu_import.cfg`，并为首次修改保留 `.ti-toolbox.bak`。
+- Keil Tools 配置优先复用命令相同的现有项；否则更新 TI工具箱自有项或使用首个空闲槽位，不覆盖其他工具。

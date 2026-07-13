@@ -48,6 +48,12 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .local-note { display: flex; align-items: center; gap: 8px; color: #647388; font-size: 11px; }
 .local-note > span { width: 7px; height: 7px; border-radius: 50%; background: #21b887; }
 
+.mode-tabs { display: flex; gap: 8px; margin: -4px 0 14px; }
+.mode-tabs button { display: flex; align-items: baseline; gap: 8px; border-color: transparent; padding: 8px 12px; color: #637287; background: transparent; }
+.mode-tabs button[aria-pressed="true"] { border-color: #c9d8eb; color: var(--blue); background: white; box-shadow: 0 4px 14px rgba(28, 42, 61, .06); }
+.mode-tabs strong { font-size: 11px; }
+.mode-tabs small { color: #96a1af; font-size: 8px; }
+
 .hero {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 220px;
@@ -74,6 +80,11 @@ button:disabled { cursor: not-allowed; opacity: .48; }
   background: white;
   box-shadow: 0 12px 34px rgba(28, 42, 61, .08);
 }
+
+.setup-only { display: none; }
+body[data-mode="setup"] .conversion-only,
+body[data-mode="setup"] .conversion-only-field { display: none !important; }
+body[data-mode="setup"] .setup-only { display: grid; }
 
 .progress {
   display: grid;
@@ -175,6 +186,14 @@ button:hover:not(:disabled) { border-color: #96add0; background: #f6f9fd; transf
   padding: 20px 28px;
   background: #f7f9fb;
 }
+.setup-panel {
+  grid-template-columns: minmax(0, 1fr) 250px;
+  align-items: center;
+  gap: 22px;
+  border-top: 1px solid #dce3eb;
+  padding: 20px 28px;
+  background: #f7f9fb;
+}
 .conversion-info { min-width: 0; }
 .status { display: grid; min-width: 0; gap: 3px; margin-top: 0; padding: 0; background: transparent; }
 .status strong { color: #25344a; font-size: 12px; overflow-wrap: anywhere; }
@@ -214,6 +233,7 @@ footer { padding: 17px 0 0; color: #98a3b1; font-size: 9px; text-align: center; 
   .build-mode { grid-template-columns: 1fr; align-items: stretch; }
   .workflow-section { padding: 20px; }
   .conversion-panel { grid-template-columns: 1fr; padding: 18px 20px; }
+  .setup-panel { grid-template-columns: 1fr; padding: 18px 20px; }
 }
 
 @media (max-width: 500px) {
@@ -225,4 +245,6 @@ footer { padding: 17px 0 0; color: #98a3b1; font-size: 9px; text-align: center; 
   .section-title p { display: none; }
   .section-title { align-items: flex-start; }
   .section-actions { flex-direction: column; }
+  .mode-tabs { display: grid; grid-template-columns: 1fr 1fr; }
+  .mode-tabs button { display: grid; gap: 2px; text-align: left; white-space: normal; }
 }

@@ -1,20 +1,32 @@
-use ccs2keil_core::{
-    BuildValidationReport, ConversionReport, ConversionRequest, EnvironmentDiscovery,
-    EnvironmentRequest, KeilSysConfigRequest, KeilSysConfigResult, ProjectInspection,
-};
 use std::{path::Path, process::Command};
 use tauri::Emitter;
+use ti_toolbox_core::{
+    BuildValidationReport, ConversionReport, ConversionRequest, EnvironmentDiscovery,
+    EnvironmentRequest, KeilEnvironmentDiscovery, KeilEnvironmentRequest, KeilSysConfigRequest,
+    KeilSysConfigResult, ProjectInspection,
+};
 
 #[tauri::command]
 async fn discover_environment(request: EnvironmentRequest) -> Result<EnvironmentDiscovery, String> {
-    tauri::async_runtime::spawn_blocking(move || ccs2keil_core::discover_environment(&request))
+    tauri::async_runtime::spawn_blocking(move || ti_toolbox_core::discover_environment(&request))
         .await
         .map_err(|error| format!("环境自动检测任务异常结束：{error}"))?
 }
 
 #[tauri::command]
+async fn discover_keil_environment(
+    request: KeilEnvironmentRequest,
+) -> Result<KeilEnvironmentDiscovery, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ti_toolbox_core::discover_keil_environment(&request)
+    })
+    .await
+    .map_err(|error| format!("Keil 环境自动检测任务异常结束：{error}"))?
+}
+
+#[tauri::command]
 fn configure_keil_sysconfig(request: KeilSysConfigRequest) -> Result<KeilSysConfigResult, String> {
-    ccs2keil_core::configure_keil_sysconfig(&request)
+    ti_toolbox_core::configure_keil_sysconfig(&request)
 }
 
 #[tauri::command]
@@ -31,12 +43,12 @@ fn open_pack_download(url: String) -> Result<(), String> {
 
 #[tauri::command]
 fn inspect_project(project_path: String) -> Result<ProjectInspection, String> {
-    ccs2keil_core::inspect_project(Path::new(&project_path))
+    ti_toolbox_core::inspect_project(Path::new(&project_path))
 }
 
 #[tauri::command]
 fn convert_project(request: ConversionRequest) -> Result<ConversionReport, String> {
-    ccs2keil_core::convert_project(&request)
+    ti_toolbox_core::convert_project(&request)
 }
 
 #[tauri::command]
@@ -50,7 +62,7 @@ async fn validate_project_build(
     operation_id: String,
 ) -> Result<BuildValidationReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        ccs2keil_core::validate_project_build_with_progress(
+        ti_toolbox_core::validate_project_build_with_progress(
             Path::new(&project_path),
             Path::new(&ccs_path),
             Path::new(&keil_path),
@@ -67,7 +79,7 @@ async fn validate_project_build(
 
 #[tauri::command]
 fn cleanup_validation_copy(path: String) -> Result<(), String> {
-    ccs2keil_core::cleanup_validation_copy(Path::new(&path))
+    ti_toolbox_core::cleanup_validation_copy(Path::new(&path))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -76,6 +88,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             discover_environment,
+            discover_keil_environment,
             configure_keil_sysconfig,
             open_pack_download,
             inspect_project,
@@ -84,5 +97,5 @@ pub fn run() {
             cleanup_validation_copy
         ])
         .run(tauri::generate_context!())
-        .expect("启动 CCS2KEIL 失败");
+        .expect("启动 TI工具箱 失败");
 }

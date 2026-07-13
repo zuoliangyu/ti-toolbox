@@ -1,5 +1,5 @@
 [package]
-name = "ccs2keil-core"
+name = "ti-toolbox-core"
 version = "0.1.0"
 edition = "2021"
 

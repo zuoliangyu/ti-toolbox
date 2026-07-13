@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import "./styles.css";
 
 type ProjectKind = "ccs" | "keil";
+type AppMode = "convert" | "setup";
 
 interface EnvironmentDiscovery {
   projectKind: ProjectKind;
@@ -17,6 +18,16 @@ interface EnvironmentDiscovery {
   packDownloadUrl: string | null;
   ccsPath: string | null;
   ccsExecutable: string | null;
+  keilPath: string | null;
+  keilExecutable: string | null;
+  sysconfigPath: string | null;
+  sysconfigExecutable: string | null;
+  warnings: string[];
+}
+
+interface KeilEnvironmentDiscovery {
+  sdkPath: string | null;
+  sdkVersion: string | null;
   keilPath: string | null;
   keilExecutable: string | null;
   sysconfigPath: string | null;
@@ -77,25 +88,30 @@ app.innerHTML = `
     <header class="topbar">
       <div class="brand">
         <img src="${appIcon}" alt="" />
-        <div><strong>CCS2KEIL</strong><span>MSPM0 工程转换器</span></div>
+        <div><strong>TI工具箱</strong><span>MSPM0 开发工具集</span></div>
       </div>
       <div class="local-note"><span></span>所有操作均在本机完成</div>
     </header>
 
+    <nav class="mode-tabs" aria-label="功能切换">
+      <button id="mode-convert" data-mode="convert" aria-pressed="true"><strong>工程转换</strong><small>CCS ↔ Keil</small></button>
+      <button id="mode-setup" data-mode="setup" aria-pressed="false"><strong>Keil TI 环境配置</strong><small>无需选择工程</small></button>
+    </nav>
+
     <section class="hero">
       <div>
-        <p class="eyebrow">MSPM0 PROJECT CONVERTER</p>
-        <h1>CCS 与 Keil 工程，双向转换</h1>
-        <p class="hero-copy">选择开发资源与源工程，工具将基于 TI 官方模板生成目标工程。</p>
+        <p class="eyebrow" id="hero-eyebrow">MSPM0 PROJECT CONVERTER</p>
+        <h1 id="hero-title">CCS 与 Keil 工程，双向转换</h1>
+        <p class="hero-copy" id="hero-copy">选择开发资源与源工程，工具将基于 TI 官方模板生成目标工程。</p>
       </div>
       <div class="direction-box">
-        <small>当前方向</small>
+        <small id="hero-side-label">当前方向</small>
         <strong id="direction">等待识别工程</strong>
       </div>
     </section>
 
     <main class="workflow-card">
-      <nav class="progress" aria-label="转换步骤">
+      <nav class="progress conversion-only" aria-label="转换步骤">
         <div id="project-progress" data-state="idle"><b>1</b><span><strong>源工程</strong><small>先识别转换方向</small></span></div>
         <i></i>
         <div id="resource-progress" data-state="idle"><b>2</b><span><strong>开发环境</strong><small>按方向自动检测</small></span></div>
@@ -103,7 +119,7 @@ app.innerHTML = `
         <div id="output-progress" data-state="idle"><b>3</b><span><strong>输出目录</strong><small>生成目标工程</small></span></div>
       </nav>
 
-      <section class="workflow-section" id="project-step" data-state="idle">
+      <section class="workflow-section conversion-only" id="project-step" data-state="idle">
         <header class="section-title">
           <div><span>01</span><div><h2>选择源工程</h2><p>解析后只要求当前方向真正需要的资源</p></div></div>
           <div class="section-actions">
@@ -130,9 +146,9 @@ app.innerHTML = `
 
       <section class="workflow-section" id="resource-step" data-state="idle">
         <header class="section-title">
-          <div><span>02</span><div><h2>配置开发环境</h2><p>CCS 与 Keil 仅在对应构建验证时需要</p></div></div>
+          <div><span id="resource-number">02</span><div><h2 id="resource-title">配置开发环境</h2><p id="resource-description">CCS 与 Keil 仅在对应构建验证时需要</p></div></div>
           <div class="section-actions">
-            <button class="text-button" id="configure-sysconfig" disabled>配置 Keil SysConfig</button>
+            <button class="text-button conversion-only" id="open-keil-setup">独立配置 Keil TI 环境</button>
             <button class="text-button" id="detect-environment" disabled>自动检测环境</button>
           </div>
         </header>
@@ -142,21 +158,21 @@ app.innerHTML = `
             <div class="path-control"><input id="sdk-path" readonly placeholder="包含 .metadata/product.json 的目录" /><button id="pick-sdk">浏览</button></div>
           </label>
           <label>
-            <span>CMSIS Pack（CCS → Keil 必需）</span>
+            <span id="pack-label">CMSIS Pack（CCS → Keil 必需）</span>
             <div class="path-control"><input id="pack-path" readonly placeholder="自动检测已安装 Pack，或选择 .pack/.pdsc" /><button id="pick-pack">浏览</button></div>
             <small class="field-hint">常见位置：&lt;Keil&gt;\ARM\PACK\TexasInstruments 或 &lt;Keil&gt;\ARM\Packs\TexasInstruments；也可直接选择 .pack/.pdsc 文件。</small>
           </label>
-          <label>
+          <label class="conversion-only-field">
             <span>CCS 安装目录（可选）</span>
             <div class="path-control"><input id="ccs-path" readonly placeholder="例如 D:\\ti\\ccs2100\\ccs\\theia" /><button id="pick-ccs">浏览</button></div>
           </label>
           <label>
-            <span>Keil 安装目录（可选）</span>
+            <span id="keil-label">Keil 安装目录（可选）</span>
             <div class="path-control"><input id="keil-path" readonly placeholder="例如 D:\\Keil_v5" /><button id="pick-keil">浏览</button></div>
           </label>
           <label>
-            <span>SysConfig 根目录（可选）</span>
-            <div class="path-control"><input id="sysconfig-path" readonly placeholder="可来自 CCS，也可独立安装" /><button id="pick-sysconfig">浏览</button></div>
+            <span id="sysconfig-label">SysConfig 根目录（可选）</span>
+            <div class="path-control"><input id="sysconfig-path" readonly placeholder="需包含 nw/nw.exe 与 sysconfig_cli.bat" /><button id="pick-sysconfig">浏览</button></div>
           </label>
           <label class="search-depth-field">
             <span>工具目录向下搜索层级</span>
@@ -175,7 +191,7 @@ app.innerHTML = `
         </div>
       </section>
 
-      <section class="workflow-section" id="output-step" data-state="idle">
+      <section class="workflow-section conversion-only" id="output-step" data-state="idle">
         <header class="section-title">
           <div><span>03</span><div><h2>设置输出目录</h2><p>为避免误覆盖，只允许使用空目录</p></div></div>
         </header>
@@ -185,7 +201,7 @@ app.innerHTML = `
         </label>
       </section>
 
-      <section class="conversion-panel">
+      <section class="conversion-panel conversion-only">
         <div class="conversion-info">
           <div class="status muted" id="status" role="status" aria-live="polite">
             <strong>准备就绪</strong><span>按顺序完成以上三步即可开始转换。</span>
@@ -194,9 +210,19 @@ app.innerHTML = `
         </div>
         <button class="primary" id="convert" disabled><strong>开始转换</strong><small id="convert-caption">请先完成资源、工程和输出配置</small></button>
       </section>
+
+      <section class="setup-panel setup-only">
+        <div>
+          <div class="status muted" id="setup-status" role="status" aria-live="polite">
+            <strong>等待检测 Keil TI 环境</strong><span>自动查找 SDK、Keil 与 SysConfig 后即可一键配置。</span>
+          </div>
+          <div class="safety-note"><span>✓ 修改前自动备份</span><span>✓ 不覆盖其他 Keil Tools</span><span>✓ Pack 由用户手动安装</span></div>
+        </div>
+        <button class="primary" id="configure-sysconfig" disabled><strong>一键配置 Keil TI 环境</strong><small>更新 SDK 配置并写入 Keil Tools 菜单</small></button>
+      </section>
     </main>
 
-    <footer>CCS2KEIL · TI MSPM0 NoRTOS DriverLib Project Bridge</footer>
+    <footer>TI工具箱 · TI MSPM0 工程转换与环境配置</footer>
   </div>
 `;
 
@@ -219,9 +245,24 @@ const toolSearchDepth = element<HTMLSelectElement>("tool-search-depth");
 const detectEnvironmentButton = element<HTMLButtonElement>("detect-environment");
 const configureSysconfigButton = element<HTMLButtonElement>("configure-sysconfig");
 const packDownloadButton = element<HTMLButtonElement>("pack-download");
+const setupStatusView = element<HTMLElement>("setup-status");
+const modeConvertButton = element<HTMLButtonElement>("mode-convert");
+const modeSetupButton = element<HTMLButtonElement>("mode-setup");
+const heroEyebrow = element<HTMLElement>("hero-eyebrow");
+const heroTitle = element<HTMLElement>("hero-title");
+const heroCopy = element<HTMLElement>("hero-copy");
+const heroSideLabel = element<HTMLElement>("hero-side-label");
+const resourceNumber = element<HTMLElement>("resource-number");
+const resourceTitle = element<HTMLElement>("resource-title");
+const resourceDescription = element<HTMLElement>("resource-description");
+const packLabel = element<HTMLElement>("pack-label");
+const keilLabel = element<HTMLElement>("keil-label");
+const sysconfigLabel = element<HTMLElement>("sysconfig-label");
 
 let environment: EnvironmentDiscovery | null = null;
+let setupEnvironment: KeilEnvironmentDiscovery | null = null;
 let inspection: ProjectInspection | null = null;
+let appMode: AppMode = setting("mode", "convert") === "setup" ? "setup" : "convert";
 let sourceValidatedPath = "";
 let sourceValidationFailed = false;
 let conversionProjectPath = "";
@@ -229,12 +270,12 @@ let sourceCleanupPath: string | null = null;
 let activeBuildOperation = "";
 let liveLogView: HTMLPreElement | null = null;
 
-sdkInput.value = localStorage.getItem("ccs2keil.sdkPath") ?? "";
-packInput.value = localStorage.getItem("ccs2keil.packPath") ?? "";
-ccsInput.value = localStorage.getItem("ccs2keil.ccsPath") ?? "";
-keilInput.value = localStorage.getItem("ccs2keil.keilPath") ?? "";
-sysconfigInput.value = localStorage.getItem("ccs2keil.sysconfigPath") ?? "";
-toolSearchDepth.value = localStorage.getItem("ccs2keil.toolSearchDepth") ?? "2";
+sdkInput.value = setting("sdkPath");
+packInput.value = setting("packPath");
+ccsInput.value = setting("ccsPath");
+keilInput.value = setting("keilPath");
+sysconfigInput.value = setting("sysconfigPath");
+toolSearchDepth.value = setting("toolSearchDepth", "2");
 
 void listen<[string, string]>("build-log", ({ payload: [operationId, chunk] }) => {
   if (operationId !== activeBuildOperation || !liveLogView) return;
@@ -242,14 +283,19 @@ void listen<[string, string]>("build-log", ({ payload: [operationId, chunk] }) =
   liveLogView.scrollTop = liveLogView.scrollHeight;
 });
 
+modeConvertButton.addEventListener("click", () => setMode("convert"));
+modeSetupButton.addEventListener("click", () => setMode("setup"));
+element("open-keil-setup").addEventListener("click", () => setMode("setup"));
+
 element("pick-sdk").addEventListener("click", async () => {
   const selected = await open({ directory: true, multiple: false, defaultPath: sdkInput.value || undefined });
   if (typeof selected === "string") {
     await discardSourceValidation();
     sdkInput.value = selected;
-    localStorage.setItem("ccs2keil.sdkPath", selected);
+    saveSetting("sdkPath", selected);
     environment = null;
-    if (inspection) await detectEnvironment();
+    setupEnvironment = null;
+    if (inspection || appMode === "setup") await detectEnvironment();
   }
 });
 
@@ -262,9 +308,10 @@ element("pick-pack").addEventListener("click", async () => {
   if (typeof selected === "string") {
     await discardSourceValidation();
     packInput.value = selected;
-    localStorage.setItem("ccs2keil.packPath", selected);
+    saveSetting("packPath", selected);
     environment = null;
-    if (inspection) await detectEnvironment();
+    setupEnvironment = null;
+    if (inspection || appMode === "setup") await detectEnvironment();
   }
 });
 
@@ -273,7 +320,7 @@ element("pick-ccs").addEventListener("click", async () => {
   if (typeof selected === "string") {
     await discardSourceValidation();
     ccsInput.value = selected;
-    localStorage.setItem("ccs2keil.ccsPath", selected);
+    saveSetting("ccsPath", selected);
     environment = null;
     if (inspection) await detectEnvironment();
   }
@@ -284,9 +331,10 @@ element("pick-keil").addEventListener("click", async () => {
   if (typeof selected === "string") {
     await discardSourceValidation();
     keilInput.value = selected;
-    localStorage.setItem("ccs2keil.keilPath", selected);
+    saveSetting("keilPath", selected);
     environment = null;
-    if (inspection) await detectEnvironment();
+    setupEnvironment = null;
+    if (inspection || appMode === "setup") await detectEnvironment();
   }
 });
 
@@ -294,17 +342,19 @@ element("pick-sysconfig").addEventListener("click", async () => {
   const selected = await open({ directory: true, multiple: false, defaultPath: sysconfigInput.value || undefined });
   if (typeof selected === "string") {
     sysconfigInput.value = selected;
-    localStorage.setItem("ccs2keil.sysconfigPath", selected);
+    saveSetting("sysconfigPath", selected);
     environment = null;
-    if (inspection) await detectEnvironment();
+    setupEnvironment = null;
+    if (inspection || appMode === "setup") await detectEnvironment();
   }
 });
 
 toolSearchDepth.addEventListener("change", async () => {
   await discardSourceValidation();
-  localStorage.setItem("ccs2keil.toolSearchDepth", toolSearchDepth.value);
+  saveSetting("toolSearchDepth", toolSearchDepth.value);
   environment = null;
-  if (inspection) await detectEnvironment();
+  setupEnvironment = null;
+  if (inspection || appMode === "setup") await detectEnvironment();
 });
 
 element("pick-project").addEventListener("click", async () => {
@@ -337,8 +387,64 @@ packDownloadButton.addEventListener("click", openPackDownload);
 validateSourceButton.addEventListener("click", validateSourceProject);
 ccsBuildMode.addEventListener("change", () => void discardSourceValidation());
 convertButton.addEventListener("click", convertProject);
+void setMode(appMode);
+
+async function setMode(mode: AppMode): Promise<void> {
+  appMode = mode;
+  saveSetting("mode", mode);
+  document.body.dataset.mode = mode;
+  modeConvertButton.setAttribute("aria-pressed", String(mode === "convert"));
+  modeSetupButton.setAttribute("aria-pressed", String(mode === "setup"));
+  if (mode === "setup") {
+    heroEyebrow.textContent = "KEIL TI ENVIRONMENT SETUP";
+    heroTitle.textContent = "一键配置 Keil 的 TI 开发环境";
+    heroCopy.textContent = "无需选择工程，自动检测 MSPM0 SDK、Keil 与 SysConfig，并安全更新 Keil Tools 菜单。";
+    heroSideLabel.textContent = "当前功能";
+    directionView.textContent = "Keil TI 环境配置";
+    directionView.classList.add("ready");
+    resourceNumber.textContent = "01";
+    resourceTitle.textContent = "检测并配置环境";
+    resourceDescription.textContent = "Pack 手动安装；SDK、Keil 与 SysConfig 可自动检测";
+    packLabel.textContent = "CMSIS Pack（手动安装，可选）";
+    keilLabel.textContent = "Keil 安装目录（必需）";
+    sysconfigLabel.textContent = "SysConfig 根目录（必需）";
+    packDownloadButton.hidden = false;
+    if (setupEnvironment) renderKeilEnvironment(setupEnvironment);
+    else await detectKeilEnvironment();
+  } else {
+    heroEyebrow.textContent = "MSPM0 PROJECT CONVERTER";
+    heroTitle.textContent = "CCS 与 Keil 工程，双向转换";
+    heroCopy.textContent = "选择开发资源与源工程，工具将基于 TI 官方模板生成目标工程。";
+    heroSideLabel.textContent = "当前方向";
+    directionView.textContent = inspection
+      ? `${kindLabel(inspection.kind)} → ${kindLabel(inspection.targetKind)}`
+      : "等待识别工程";
+    directionView.classList.toggle("ready", Boolean(inspection));
+    resourceNumber.textContent = "02";
+    resourceTitle.textContent = "配置开发环境";
+    resourceDescription.textContent = "CCS 与 Keil 仅在对应构建验证时需要";
+    packLabel.textContent = "CMSIS Pack（CCS → Keil 必需）";
+    keilLabel.textContent = "Keil 安装目录（可选）";
+    sysconfigLabel.textContent = "SysConfig 根目录（可选）";
+    if (environment) renderEnvironment(environment);
+    else {
+      resourceResult.className = "inline-result muted resource-result";
+      resourceResult.replaceChildren(
+        resultDot(),
+        textBlock("p", "解析工程后可自动检测 SDK、Pack、CCS、Keil 与 SysConfig。"),
+        packDownloadButton,
+      );
+      packDownloadButton.hidden = true;
+    }
+  }
+  updateActionState();
+}
 
 async function detectEnvironment(): Promise<void> {
+  if (appMode === "setup") {
+    await detectKeilEnvironment();
+    return;
+  }
   if (!inspection || !projectInput.value) return;
   setBusy(true, "正在自动检测开发环境", "按当前转换方向查找 SDK、Pack、CCS、Keil 与 SysConfig…");
   try {
@@ -353,11 +459,11 @@ async function detectEnvironment(): Promise<void> {
         searchDepth: Number(toolSearchDepth.value),
       },
     });
-    applyDiscoveredPath(sdkInput, "ccs2keil.sdkPath", environment.sdkPath);
-    applyDiscoveredPath(packInput, "ccs2keil.packPath", environment.packPath);
-    applyDiscoveredPath(ccsInput, "ccs2keil.ccsPath", environment.ccsPath);
-    applyDiscoveredPath(keilInput, "ccs2keil.keilPath", environment.keilPath);
-    applyDiscoveredPath(sysconfigInput, "ccs2keil.sysconfigPath", environment.sysconfigPath);
+    applyDiscoveredPath(sdkInput, "sdkPath", environment.sdkPath);
+    applyDiscoveredPath(packInput, "packPath", environment.packPath);
+    applyDiscoveredPath(ccsInput, "ccsPath", environment.ccsPath);
+    applyDiscoveredPath(keilInput, "keilPath", environment.keilPath);
+    applyDiscoveredPath(sysconfigInput, "sysconfigPath", environment.sysconfigPath);
     renderEnvironment(environment);
     const ready = environmentReady();
     markStep("resource", ready ? "ready" : "error");
@@ -373,6 +479,33 @@ async function detectEnvironment(): Promise<void> {
     resourceResult.replaceChildren(resultDot(), textBlock("p", errorMessage(error)), packDownloadButton);
     markStep("resource", "error");
     showStatus("环境检测失败", errorMessage(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function detectKeilEnvironment(): Promise<void> {
+  environment = null;
+  setBusy(true, "正在检测 Keil TI 环境", "查找 MSPM0 SDK、Keil 与 SysConfig…");
+  try {
+    setupEnvironment = await invoke<KeilEnvironmentDiscovery>("discover_keil_environment", {
+      request: {
+        sdkPath: sdkInput.value,
+        keilPath: keilInput.value,
+        sysconfigPath: sysconfigInput.value,
+        searchDepth: Number(toolSearchDepth.value),
+      },
+    });
+    applyDiscoveredPath(sdkInput, "sdkPath", setupEnvironment.sdkPath);
+    applyDiscoveredPath(keilInput, "keilPath", setupEnvironment.keilPath);
+    applyDiscoveredPath(sysconfigInput, "sysconfigPath", setupEnvironment.sysconfigPath);
+    renderKeilEnvironment(setupEnvironment);
+  } catch (error) {
+    setupEnvironment = null;
+    resourceResult.className = "inline-result error resource-result";
+    resourceResult.replaceChildren(resultDot(), textBlock("p", errorMessage(error)), packDownloadButton);
+    packDownloadButton.hidden = false;
+    showSetupStatus("环境检测失败", errorMessage(error), true);
   } finally {
     setBusy(false);
   }
@@ -398,35 +531,58 @@ function renderEnvironment(found: EnvironmentDiscovery): void {
   resourceResult.replaceChildren(resultDot(), textBlock("p", lines.join("\n")), packDownloadButton);
 }
 
+function renderKeilEnvironment(found: KeilEnvironmentDiscovery): void {
+  const ready = keilSetupReady(found);
+  const lines = [
+    `SDK：${found.sdkVersion ? `${found.sdkVersion} · ${found.sdkPath}` : "未找到（必需）"}`,
+    `Keil：${found.keilExecutable ?? "未找到（必需）"}`,
+    `SysConfig：${found.sysconfigExecutable ?? "未找到（必需）"}`,
+    `Pack：${packInput.value || "请手动安装到 Keil ARM\\PACK 或 ARM\\Packs；不影响 SysConfig 配置"}`,
+    ...found.warnings.map((warning) => `提示：${warning}`),
+  ];
+  resourceResult.className = `inline-result ${ready ? "success" : "error"} resource-result`;
+  resourceResult.replaceChildren(resultDot(), textBlock("p", lines.join("\n")), packDownloadButton);
+  packDownloadButton.hidden = false;
+  markStep("resource", ready ? "ready" : "error");
+  showSetupStatus(
+    ready ? "Keil TI 环境已就绪" : "仍缺少一键配置所需路径",
+    ready ? "可以执行一键配置；操作前会再次确认。" : "请根据红色提示补充 SDK、Keil 或 SysConfig。",
+    !ready,
+  );
+}
+
 async function configureKeilSysconfig(): Promise<void> {
-  if (!environment?.sdkPath || !environment.keilPath || !environment.sysconfigPath) return;
-  const message = `将备份并更新以下 SDK 配置：\n${environment.sdkPath}\\tools\\keil\\syscfg.bat\n${environment.sdkPath}\\tools\\keil\\MSPM0_SDK_syscfg_menu_import.cfg\n\n同时写入当前用户的 Keil Tools 菜单。是否继续？`;
+  if (!setupEnvironment?.sdkPath || !setupEnvironment.keilPath || !setupEnvironment.sysconfigPath) return;
+  const message = `将备份并更新以下 SDK 配置：\n${setupEnvironment.sdkPath}\\tools\\keil\\syscfg.bat\n${setupEnvironment.sdkPath}\\tools\\keil\\MSPM0_SDK_syscfg_menu_import.cfg\n\n同时写入当前用户的 Keil Tools 菜单。是否继续？`;
   if (!window.confirm(message)) return;
   setBusy(true, "正在配置 Keil SysConfig", "备份 SDK 配置并更新 Keil Tools 菜单…");
   try {
     const result = await invoke<KeilSysConfigResult>("configure_keil_sysconfig", {
       request: {
-        sdkPath: environment.sdkPath,
-        keilPath: environment.keilPath,
-        sysconfigPath: environment.sysconfigPath,
+        sdkPath: setupEnvironment.sdkPath,
+        keilPath: setupEnvironment.keilPath,
+        sysconfigPath: setupEnvironment.sysconfigPath,
         searchDepth: Number(toolSearchDepth.value),
       },
     });
-    showStatus(
+    showSetupStatus(
       result.changed ? "Keil SysConfig 配置完成" : "Keil SysConfig 已经配置完成",
       `Tools 槽位 ${result.slot} · ${result.title}${result.updatedFiles.length ? ` · 已更新 ${result.updatedFiles.length} 个 SDK 文件` : ""}${result.backupFiles.length ? ` · 已创建 ${result.backupFiles.length} 个备份` : ""}`,
     );
   } catch (error) {
-    showStatus("Keil SysConfig 配置失败", errorMessage(error), true);
+    showSetupStatus("Keil SysConfig 配置失败", errorMessage(error), true);
   } finally {
     setBusy(false);
   }
 }
 
 async function openPackDownload(): Promise<void> {
-  if (!environment?.packDownloadUrl) return;
+  const url = appMode === "setup"
+    ? "https://www.keil.arm.com/packs/?q=MSPM0"
+    : environment?.packDownloadUrl;
+  if (!url) return;
   try {
-    await invoke("open_pack_download", { url: environment.packDownloadUrl });
+    await invoke("open_pack_download", { url });
   } catch (error) {
     showStatus("无法打开 Pack 下载页", errorMessage(error), true);
   }
@@ -435,7 +591,7 @@ async function openPackDownload(): Promise<void> {
 function applyDiscoveredPath(input: HTMLInputElement, storageKey: string, value: string | null): void {
   if (!value) return;
   input.value = value;
-  localStorage.setItem(storageKey, value);
+  saveSetting(storageKey, value);
 }
 
 async function inspectProject(): Promise<void> {
@@ -660,7 +816,10 @@ function setBusy(busy: boolean, title?: string, detail?: string): void {
   document.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
     button.disabled = busy;
   });
-  if (title) showStatus(title, detail ?? "");
+  if (title) {
+    if (appMode === "setup") showSetupStatus(title, detail ?? "");
+    else showStatus(title, detail ?? "");
+  }
   if (!busy) {
     document.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
       button.disabled = false;
@@ -670,12 +829,12 @@ function setBusy(busy: boolean, title?: string, detail?: string): void {
 }
 
 function updateActionState(): void {
-  detectEnvironmentButton.disabled = !inspection;
+  detectEnvironmentButton.disabled = appMode === "convert" && !inspection;
   validateSourceButton.disabled = !sourceToolAvailable();
   validateSourceButton.title = inspection && !sourceToolAvailable()
     ? `未配置 ${kindLabel(inspection.kind)}，无法执行源工程构建验证`
     : "";
-  configureSysconfigButton.disabled = !environment?.sdkPath || !environment.keilPath || !environment.sysconfigPath;
+  configureSysconfigButton.disabled = appMode !== "setup" || !keilSetupReady();
   configureSysconfigButton.title = configureSysconfigButton.disabled
     ? "需要 SDK、Keil 与 SysConfig 路径"
     : "备份并更新 SDK 配置文件和 Keil Tools 菜单";
@@ -692,6 +851,10 @@ function updateActionState(): void {
     : sourceValidatedPath === projectInput.value
       ? "源工程验证通过，可以开始转换"
       : "可以转换，建议先执行构建验证";
+}
+
+function keilSetupReady(found = setupEnvironment): boolean {
+  return Boolean(found?.sdkPath && found.keilPath && found.sysconfigPath);
 }
 
 function environmentReady(found = environment): boolean {
@@ -723,6 +886,19 @@ async function cleanupValidationCopy(path: string): Promise<void> {
 function showStatus(title: string, detail = "", error = false): void {
   statusView.className = error ? "status error" : "status muted";
   statusView.replaceChildren(textBlock("strong", title), textBlock("span", detail));
+}
+
+function showSetupStatus(title: string, detail = "", error = false): void {
+  setupStatusView.className = error ? "status error" : "status muted";
+  setupStatusView.replaceChildren(textBlock("strong", title), textBlock("span", detail));
+}
+
+function setting(key: string, fallback = ""): string {
+  return localStorage.getItem(`ti-toolbox.${key}`) ?? fallback;
+}
+
+function saveSetting(key: string, value: string): void {
+  localStorage.setItem(`ti-toolbox.${key}`, value);
 }
 
 function errorMessage(error: unknown): string {

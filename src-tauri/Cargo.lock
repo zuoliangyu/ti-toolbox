@@ -286,26 +286,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ccs2keil"
-version = "0.1.0"
-dependencies = [
- "ccs2keil-core",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
-]
-
-[[package]]
-name = "ccs2keil-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "xmltree",
- "zip",
-]
-
-[[package]]
 name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3310,6 +3290,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "ti-toolbox"
+version = "0.1.0"
+dependencies = [
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "ti-toolbox-core",
+]
+
+[[package]]
+name = "ti-toolbox-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "xmltree",
+ "zip",
 ]
 
 [[package]]

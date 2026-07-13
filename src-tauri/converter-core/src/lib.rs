@@ -125,6 +125,27 @@ pub struct EnvironmentDiscovery {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct KeilEnvironmentRequest {
+    pub sdk_path: String,
+    pub keil_path: String,
+    pub sysconfig_path: String,
+    pub search_depth: u8,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeilEnvironmentDiscovery {
+    pub sdk_path: Option<String>,
+    pub sdk_version: Option<String>,
+    pub keil_path: Option<String>,
+    pub keil_executable: Option<String>,
+    pub sysconfig_path: Option<String>,
+    pub sysconfig_executable: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct KeilSysConfigRequest {
     pub sdk_path: String,
     pub keil_path: String,
@@ -254,6 +275,45 @@ pub fn discover_environment(request: &EnvironmentRequest) -> Result<EnvironmentD
         pack_download_url,
         ccs_path: ccs_root.as_ref().map(|path| path_text(path)),
         ccs_executable: ccs.as_ref().map(|path| path_text(path)),
+        keil_path: keil_root.as_ref().map(|path| path_text(path)),
+        keil_executable: keil.as_ref().map(|path| path_text(path)),
+        sysconfig_path: sysconfig.as_ref().map(|path| path_text(path)),
+        sysconfig_executable: sysconfig
+            .as_ref()
+            .map(|path| path_text(&sysconfig_nw_executable(path))),
+        warnings,
+    })
+}
+
+pub fn discover_keil_environment(
+    request: &KeilEnvironmentRequest,
+) -> Result<KeilEnvironmentDiscovery, String> {
+    if request.search_depth > 4 {
+        return Err("工具目录搜索层级只能是 0–4".into());
+    }
+    let sdk = discover_sdk(&request.sdk_path);
+    let sdk_version = sdk.as_ref().and_then(|path| validate_sdk(path).ok());
+    let keil = discover_keil(&request.keil_path, request.search_depth);
+    let sysconfig = discover_sysconfig(&request.sysconfig_path, None);
+    let mut warnings = Vec::new();
+    if sdk.is_none() {
+        warnings.push("未找到 MSPM0 SDK；一键配置前需要手动选择".into());
+    }
+    if keil.is_none() {
+        warnings.push("未找到 Keil；一键配置前需要手动选择".into());
+    }
+    if sysconfig.is_none() {
+        warnings.push(
+            "未找到带图形界面的 SysConfig（需包含 nw/nw.exe）；一键配置前需要手动选择或独立安装"
+                .into(),
+        );
+    }
+    let keil_root = keil
+        .as_ref()
+        .and_then(|path| path.parent().and_then(Path::parent).map(Path::to_path_buf));
+    Ok(KeilEnvironmentDiscovery {
+        sdk_path: sdk.as_ref().map(|path| path_text(path)),
+        sdk_version,
         keil_path: keil_root.as_ref().map(|path| path_text(path)),
         keil_executable: keil.as_ref().map(|path| path_text(path)),
         sysconfig_path: sysconfig.as_ref().map(|path| path_text(path)),
@@ -562,7 +622,7 @@ pub fn configure_keil_sysconfig(
     let command = format!("\"{}\" \"{}\"", executable.display(), sysconfig.display());
     let working_directory = path_text(sdk);
     let arguments = "--compiler keil -s \".metadata\\product.json\" \"#E\"".to_string();
-    let title = format!("CCS2KEIL SysConfig - SDK {sdk_version}");
+    let title = format!("TI工具箱 SysConfig - SDK {sdk_version}");
     let key = keil_tool_registry_key()
         .ok_or("未找到 Keil 用户配置；请先启动一次 Keil µVision，再重新执行一键配置")?;
     let registry = query_registry_key(&key)?;
@@ -623,12 +683,11 @@ fn update_sdk_keil_sysconfig_files(
         if current == updated {
             continue;
         }
-        let backup = path.with_file_name(format!(
-            "{}.ccs2keil.bak",
-            path.file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("config")
-        ));
+        let file_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("config");
+        let backup = path.with_file_name(format!("{file_name}.ti-toolbox.bak"));
         if !backup.exists() {
             fs::copy(path, &backup)
                 .map_err(|error| format!("无法备份 {}：{error}", path.display()))?;
@@ -760,7 +819,7 @@ fn choose_keil_tool_slot(registry: &str, command: &str) -> Option<(u8, bool)> {
         if name.starts_with("Mex") && normalize_registry_command(value) == expected {
             return Some((slot, true));
         }
-        if name.starts_with("Mtx") && value.starts_with("CCS2KEIL SysConfig") {
+        if name.starts_with("Mtx") && value.starts_with("TI工具箱 SysConfig") {
             own_slot = Some(slot);
         }
     }
@@ -851,9 +910,9 @@ pub fn cleanup_validation_copy(path: &Path) -> Result<(), String> {
     let valid_name = path
         .file_name()
         .and_then(|value| value.to_str())
-        .is_some_and(|value| value.starts_with("ccs2keil-ccs-validation-"));
+        .is_some_and(|value| value.starts_with("ti-toolbox-ccs-validation-"));
     if !path.starts_with(&temp) || !valid_name {
-        return Err("拒绝清理非 CCS2KEIL 临时验证目录".into());
+        return Err("拒绝清理非 TI工具箱 临时验证目录".into());
     }
     fs::remove_dir_all(path).map_err(|error| format!("无法清理临时验证目录：{error}"))
 }
@@ -1010,7 +1069,7 @@ fn run_ccs(
     command
         .args(["-nosplash", "-data"])
         .arg(metadata)
-        .args(["-application", application, "-ccs.launcher", "ccs2keil"])
+        .args(["-application", application, "-ccs.launcher", "ti-toolbox"])
         .arg("-ccs.defaultImportDestination")
         .arg(workspace)
         .args(arguments);
@@ -1057,7 +1116,7 @@ fn strict_makefile(makefile: &str) -> Result<(String, String, Vec<String>), Stri
         return Err("CCS makefile 中未找到可复用的 TI 链接命令".into());
     }
     let stem = target.trim_end_matches(".out");
-    let strict_stem = "ccs2keil-strict-validation";
+    let strict_stem = "ti-toolbox-strict-validation";
     let strict_target = format!("{strict_stem}.out");
     let map = format!("{strict_stem}.map");
     let xml = format!("{strict_stem}_linkInfo.xml");
@@ -1092,7 +1151,7 @@ fn validate_keil_build(
     let log_path = project
         .parent()
         .unwrap_or(Path::new("."))
-        .join("ccs2keil-keil-build.log");
+        .join("ti-toolbox-keil-build.log");
     let _ = fs::remove_file(&log_path);
     progress("===== Keil Build =====\n");
     Command::new(&uv4)
@@ -1286,7 +1345,7 @@ fn unique_temp_dir(name: &str) -> PathBuf {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|value| value.as_nanos())
         .unwrap_or_default();
-    std::env::temp_dir().join(format!("ccs2keil-{name}-{id}"))
+    std::env::temp_dir().join(format!("ti-toolbox-{name}-{id}"))
 }
 
 fn run_streaming_command(
@@ -1450,7 +1509,7 @@ fn staging_path(output: &Path) -> PathBuf {
     output
         .parent()
         .unwrap_or(Path::new("."))
-        .join(format!(".{name}.ccs2keil-{id}"))
+        .join(format!(".{name}.ti-toolbox-{id}"))
 }
 
 fn copy_project_sources(
@@ -2660,7 +2719,7 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("ccs2keil-{name}-{id}"));
+        let path = std::env::temp_dir().join(format!("ti-toolbox-{name}-{id}"));
         fs::create_dir_all(&path).unwrap();
         path
     }
@@ -2776,6 +2835,45 @@ mod tests {
         let catalog = discover_environment(&request).unwrap();
         assert!(!catalog.pack_installed);
         assert_eq!(catalog.pack_version.as_deref(), Some("9.9.9"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovers_keil_environment_without_a_project() {
+        let root = temp_dir("discover-keil-environment");
+        let sdk = root.join("mspm0_sdk_2_10_00_04");
+        let keil = root.join("Keil_v5");
+        let sysconfig = root.join("sysconfig_1.26.2");
+        fs::create_dir_all(sdk.join(".metadata")).unwrap();
+        fs::create_dir_all(keil.join("UV4")).unwrap();
+        fs::create_dir_all(sysconfig.join("nw")).unwrap();
+        fs::write(
+            sdk.join(".metadata/product.json"),
+            r#"{"name":"mspm0_sdk","version":"2.10.00.04"}"#,
+        )
+        .unwrap();
+        fs::write(keil.join("UV4/UV4.exe"), "fixture").unwrap();
+        fs::write(sysconfig.join("nw/nw.exe"), "fixture").unwrap();
+        fs::write(sysconfig.join("sysconfig_cli.bat"), "fixture").unwrap();
+
+        let found = discover_keil_environment(&KeilEnvironmentRequest {
+            sdk_path: sdk.to_string_lossy().into_owned(),
+            keil_path: keil.to_string_lossy().into_owned(),
+            sysconfig_path: sysconfig.to_string_lossy().into_owned(),
+            search_depth: 2,
+        })
+        .unwrap();
+
+        assert_eq!(found.sdk_version.as_deref(), Some("2.10.00.04"));
+        assert!(found
+            .keil_executable
+            .as_deref()
+            .is_some_and(|path| path.ends_with("UV4.exe")));
+        assert!(found
+            .sysconfig_executable
+            .as_deref()
+            .is_some_and(|path| path.ends_with("nw.exe")));
+        assert!(found.warnings.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3090,10 +3188,10 @@ demo.out: $(OBJS) $(GEN_CMDS)
 "#;
         let (patched, target, artifacts) = strict_makefile(makefile).unwrap();
 
-        assert_eq!(target, "ccs2keil-strict-validation.out");
+        assert_eq!(target, "ti-toolbox-strict-validation.out");
         assert!(patched.contains("-Wl,--unused_section_elimination=off"));
-        assert!(patched.contains("ccs2keil-strict-validation.map"));
-        assert!(patched.contains("ccs2keil-strict-validation_linkInfo.xml"));
+        assert!(patched.contains("ti-toolbox-strict-validation.map"));
+        assert!(patched.contains("ti-toolbox-strict-validation_linkInfo.xml"));
         assert!(!patched.contains("-o \"demo.out\""));
         assert_eq!(artifacts.len(), 3);
     }
