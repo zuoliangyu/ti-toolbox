@@ -60,6 +60,8 @@ jobs:
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+          assetNamePattern: TI-Toolbox_[version]_[platform]_[arch][setup][ext]
           args: --bundles nsis
 
       - name: 手动构建安装版
@@ -91,3 +93,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$env:GITHUB_REF_NAME" "$env:PORTABLE_PATH" --clobber
+
+      - name: 验证自动更新清单
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$env:GITHUB_REF_NAME" --pattern latest.json --dir $env:RUNNER_TEMP --clobber
+          $latest = Get-Content (Join-Path $env:RUNNER_TEMP latest.json) -Raw | ConvertFrom-Json
+          $expectedVersion = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $windowsPlatforms = @($latest.platforms.PSObject.Properties | Where-Object Name -Like 'windows-*')
+          if ($latest.version -ne $expectedVersion -or -not $latest.notes.Trim() -or $windowsPlatforms.Count -eq 0) {
+            throw 'latest.json 缺少正确的版本、更新说明或 Windows 安装包信息'
+          }

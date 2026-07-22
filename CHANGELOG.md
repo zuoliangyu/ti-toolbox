@@ -5,6 +5,7 @@
 ### 构建
 
 - GitHub Actions 增加 Rust/Cargo 构建缓存，缩短后续 Windows 构建时间。
+- Release 产物统一使用 ASCII 文件名，确保自动更新清单能正确关联安装包和签名。
 
 ## 0.1.0 - 2026-07-22
 
