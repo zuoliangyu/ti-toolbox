@@ -6,7 +6,8 @@ import { check } from "@tauri-apps/plugin-updater";
 import "./styles.css";
 
 type ProjectKind = "ccs" | "keil";
-type AppMode = "convert" | "setup";
+type AppMode = "convert" | "setup" | "settings";
+type ColorTheme = "ti-red" | "tech-blue" | "teal" | "violet";
 
 interface EnvironmentDiscovery {
   projectKind: ProjectKind;
@@ -87,17 +88,32 @@ const appIcon = new URL("../src-tauri/icons/icon.ico", import.meta.url).href;
 
 app.innerHTML = `
   <div class="app-shell">
-    <header class="topbar">
+    <aside class="app-sidebar">
       <div class="brand">
         <img src="${appIcon}" alt="" />
-        <div><strong>TI工具箱</strong><span>MSPM0 开发工具集</span></div>
+        <div><strong>TI工具箱</strong><span>v0.1.0</span></div>
       </div>
-      <div class="topbar-tools">
-        <div class="local-note"><span></span>所有操作均在本机完成</div>
-        <button class="topbar-button" id="check-update">检查更新</button>
-        <button class="topbar-button" id="show-about">关于</button>
+
+      <nav class="mode-tabs" aria-label="功能切换">
+        <button id="mode-convert" data-mode="convert" aria-pressed="true">
+          <b aria-hidden="true">↔</b><span><strong>工程转换</strong><small>CCS ↔ Keil</small></span>
+        </button>
+        <button id="mode-setup" data-mode="setup" aria-pressed="false">
+          <b aria-hidden="true">⌁</b><span><strong>环境配置</strong><small>无需选择工程</small></span>
+        </button>
+        <button id="mode-settings" data-mode="settings" aria-pressed="false">
+          <b aria-hidden="true">◉</b><span><strong>界面设置</strong><small>MD3 配色预设</small></span>
+        </button>
+      </nav>
+
+      <div class="sidebar-actions">
+        <button id="check-update"><span aria-hidden="true">↑</span>检查更新</button>
+        <button id="show-about"><span aria-hidden="true">i</span>关于作者与项目</button>
       </div>
-    </header>
+      <div class="local-note"><span></span><strong>所有操作均在本机完成</strong></div>
+    </aside>
+
+    <section class="app-workspace">
 
     <dialog class="about-dialog" id="about-dialog" aria-labelledby="about-title">
       <div class="about-heading">
@@ -111,120 +127,116 @@ app.innerHTML = `
       <form method="dialog"><button value="close">关闭</button></form>
     </dialog>
 
-    <nav class="mode-tabs" aria-label="功能切换">
-      <button id="mode-convert" data-mode="convert" aria-pressed="true"><strong>工程转换</strong><small>CCS ↔ Keil</small></button>
-      <button id="mode-setup" data-mode="setup" aria-pressed="false"><strong>Keil TI 环境配置</strong><small>无需选择工程</small></button>
-    </nav>
-
-    <section class="hero">
+    <header class="workspace-header">
       <div>
-        <p class="eyebrow" id="hero-eyebrow">MSPM0 PROJECT CONVERTER</p>
-        <h1 id="hero-title">CCS 与 Keil 工程，双向转换</h1>
-        <p class="hero-copy" id="hero-copy">选择开发资源与源工程，工具将基于 TI 官方模板生成目标工程。</p>
+        <h1 id="hero-title">工程转换</h1>
       </div>
       <div class="direction-box">
         <small id="hero-side-label">当前方向</small>
         <strong id="direction">等待识别工程</strong>
       </div>
-    </section>
+    </header>
 
-    <main class="workflow-card">
+    <main class="workspace-content">
       <nav class="progress conversion-only" aria-label="转换步骤">
-        <div id="project-progress" data-state="idle"><b>1</b><span><strong>源工程</strong><small>先识别转换方向</small></span></div>
+        <div id="project-progress" data-state="idle"><b>1</b><span><strong>源工程</strong></span></div>
         <i></i>
-        <div id="resource-progress" data-state="idle"><b>2</b><span><strong>开发环境</strong><small>按方向自动检测</small></span></div>
+        <div id="resource-progress" data-state="idle"><b>2</b><span><strong>开发环境</strong></span></div>
         <i></i>
-        <div id="output-progress" data-state="idle"><b>3</b><span><strong>输出目录</strong><small>生成目标工程</small></span></div>
+        <div id="output-progress" data-state="idle"><b>3</b><span><strong>输出目录</strong></span></div>
       </nav>
 
-      <section class="workflow-section conversion-only" id="project-step" data-state="idle">
-        <header class="section-title">
-          <div><span>01</span><div><h2>选择源工程</h2><p>解析后只要求当前方向真正需要的资源</p></div></div>
-          <div class="section-actions">
-            <button class="text-button" id="validate-source" disabled>一键构建验证</button>
-            <button class="text-button" id="inspect-project">解析工程</button>
-          </div>
-        </header>
-        <label>
-          <span>工程目录</span>
-          <div class="path-control"><input id="project-path" readonly placeholder="CCS 目录含 .cproject；Keil 目录含 .uvprojx" /><button id="pick-project">选择工程</button></div>
-        </label>
-        <div class="build-mode">
-          <label>
-            <span>CCS 验证方式</span>
-            <select id="ccs-build-mode">
-              <option value="temporary">临时目录验证（推荐，不修改原工程）</option>
-              <option value="in-place">原工程直接构建（更新 Debug/SysConfig）</option>
-            </select>
-          </label>
-          <p><strong class="build-recommendation">建议转换前先执行“一键构建验证”</strong>；没有源 IDE 时仍可带风险继续转换，已有失败结果则必须先修复。</p>
-        </div>
-        <div class="inspection empty" id="inspection">请先选择工程，工具会自动识别转换方向。</div>
-      </section>
+      <div class="workflow-grid">
+        <div class="conversion-core conversion-only">
+          <section class="workflow-section" id="project-step" data-state="idle">
+            <header class="section-title">
+              <div><h2>选择源工程</h2></div>
+              <div class="section-actions">
+                <button class="text-button" id="validate-source" disabled>构建验证</button>
+                <button class="text-button" id="inspect-project">解析工程</button>
+              </div>
+            </header>
+            <label>
+              <span>工程目录</span>
+              <div class="path-control"><input id="project-path" readonly placeholder="CCS 目录含 .cproject；Keil 目录含 .uvprojx" /><button id="pick-project">选择工程</button></div>
+            </label>
+            <div class="build-mode">
+              <label>
+                <span>CCS 验证方式</span>
+                <select id="ccs-build-mode">
+                  <option value="temporary">临时目录验证（推荐，不修改原工程）</option>
+                  <option value="in-place">原工程直接构建（更新 Debug/SysConfig）</option>
+                </select>
+              </label>
+              <p><strong class="build-recommendation">推荐先验证</strong>；已有失败结果时需修复后再转换。</p>
+            </div>
+            <div class="inspection empty" id="inspection">请先选择工程，工具会自动识别转换方向。</div>
+          </section>
 
-      <section class="workflow-section" id="resource-step" data-state="idle">
-        <header class="section-title">
-          <div><span id="resource-number">02</span><div><h2 id="resource-title">配置开发环境</h2><p id="resource-description">CCS 与 Keil 仅在对应构建验证时需要</p></div></div>
-          <div class="section-actions">
-            <button class="text-button conversion-only" id="open-keil-setup">独立配置 Keil TI 环境</button>
-            <button class="text-button" id="detect-environment" disabled>自动检测环境</button>
-          </div>
-        </header>
-        <div class="field-grid">
-          <label>
-            <span>MSPM0 SDK 根目录（必需）</span>
-            <div class="path-control"><input id="sdk-path" readonly placeholder="包含 .metadata/product.json 的目录" /><button id="pick-sdk">浏览</button></div>
-          </label>
-          <label>
-            <span id="pack-label">CMSIS Pack（CCS → Keil 必需）</span>
-            <div class="path-control"><input id="pack-path" readonly placeholder="自动检测已安装 Pack，或选择 .pack/.pdsc" /><button id="pick-pack">浏览</button></div>
-            <small class="field-hint">常见位置：&lt;Keil&gt;\ARM\PACK\TexasInstruments 或 &lt;Keil&gt;\ARM\Packs\TexasInstruments；也可直接选择 .pack/.pdsc 文件。</small>
-          </label>
-          <label class="conversion-only-field">
-            <span>CCS 安装目录（可选）</span>
-            <div class="path-control"><input id="ccs-path" readonly placeholder="例如 D:\\ti\\ccs2100\\ccs\\theia" /><button id="pick-ccs">浏览</button></div>
-          </label>
-          <label>
-            <span id="keil-label">Keil 安装目录（可选）</span>
-            <div class="path-control"><input id="keil-path" readonly placeholder="例如 D:\\Keil_v5" /><button id="pick-keil">浏览</button></div>
-          </label>
-          <label>
-            <span id="sysconfig-label">SysConfig 根目录（可选）</span>
-            <div class="path-control"><input id="sysconfig-path" readonly placeholder="需包含 nw/nw.exe 与 sysconfig_cli.bat" /><button id="pick-sysconfig">浏览</button></div>
-          </label>
-          <label class="search-depth-field">
-            <span>工具目录向下搜索层级</span>
-            <select id="tool-search-depth">
-              <option value="0">0 级（仅当前目录）</option>
-              <option value="1">1 级</option>
-              <option value="2">2 级（默认）</option>
-              <option value="3">3 级</option>
-              <option value="4">4 级（最大）</option>
-            </select>
-          </label>
+          <section class="workflow-section" id="output-step" data-state="idle">
+            <header class="section-title">
+              <div><h2>设置输出目录</h2><p>只允许使用空目录</p></div>
+            </header>
+            <label>
+              <span>目标工程目录</span>
+              <div class="path-control"><input id="output-path" readonly placeholder="请选择不存在或完全空白的目录" /><button id="pick-output">选择目录</button></div>
+            </label>
+          </section>
         </div>
-        <div class="inline-result muted resource-result" id="resource-result">
-          <span></span><p>解析工程后可自动检测 SDK、Pack、CCS、Keil 与 SysConfig。</p>
-          <button class="text-button" id="pack-download" hidden>打开 Pack 下载页</button>
-        </div>
-      </section>
 
-      <section class="workflow-section conversion-only" id="output-step" data-state="idle">
-        <header class="section-title">
-          <div><span>03</span><div><h2>设置输出目录</h2><p>为避免误覆盖，只允许使用空目录</p></div></div>
-        </header>
-        <label>
-          <span>目标工程目录</span>
-          <div class="path-control"><input id="output-path" readonly placeholder="请选择不存在或完全空白的目录" /><button id="pick-output">选择目录</button></div>
-        </label>
-      </section>
+        <section class="workflow-section" id="resource-step" data-state="idle">
+          <header class="section-title">
+              <div><h2 id="resource-title">开发环境</h2></div>
+              <div class="section-actions">
+              <button class="text-button" id="detect-environment" disabled>自动检测</button>
+            </div>
+          </header>
+          <div class="field-grid">
+            <label>
+              <span>MSPM0 SDK 根目录（必需）</span>
+              <div class="path-control"><input id="sdk-path" readonly placeholder="包含 .metadata/product.json 的目录" /><button id="pick-sdk">浏览</button></div>
+            </label>
+            <label>
+              <span id="pack-label">CMSIS Pack（CCS → Keil 必需）</span>
+              <div class="path-control"><input id="pack-path" readonly placeholder="自动检测已安装 Pack，或选择 .pack/.pdsc" /><button id="pick-pack">浏览</button></div>
+              <small class="field-hint">可选择 TexasInstruments Pack 目录、.pack 或 .pdsc 文件。</small>
+            </label>
+            <label class="conversion-only-field">
+              <span>CCS 安装目录（可选）</span>
+              <div class="path-control"><input id="ccs-path" readonly placeholder="例如 D:\\ti\\ccs2100\\ccs\\theia" /><button id="pick-ccs">浏览</button></div>
+            </label>
+            <label>
+              <span id="keil-label">Keil 安装目录（可选）</span>
+              <div class="path-control"><input id="keil-path" readonly placeholder="例如 D:\\Keil_v5" /><button id="pick-keil">浏览</button></div>
+            </label>
+            <label>
+              <span id="sysconfig-label">SysConfig 根目录（可选）</span>
+              <div class="path-control"><input id="sysconfig-path" readonly placeholder="需包含 nw/nw.exe 与 sysconfig_cli.bat" /><button id="pick-sysconfig">浏览</button></div>
+            </label>
+            <label class="search-depth-field">
+              <span>工具目录向下搜索层级</span>
+              <select id="tool-search-depth">
+                <option value="0">0 级（仅当前目录）</option>
+                <option value="1">1 级</option>
+                <option value="2">2 级（默认）</option>
+                <option value="3">3 级</option>
+                <option value="4">4 级（最大）</option>
+              </select>
+            </label>
+          </div>
+          <div class="inline-result muted resource-result" id="resource-result">
+            <span></span><p>解析工程后可自动检测环境。</p>
+            <button class="text-button" id="pack-download" hidden>打开 Pack 下载页</button>
+          </div>
+        </section>
+      </div>
 
       <section class="conversion-panel conversion-only">
         <div class="conversion-info">
           <div class="status muted" id="status" role="status" aria-live="polite">
-            <strong>准备就绪</strong><span>按顺序完成以上三步即可开始转换。</span>
+            <strong>尚未选择工程</strong><span>完成三项配置后即可转换。</span>
           </div>
-          <div class="safety-note"><span>✓ IDE 可选</span><span>✓ 未验证时明确提示风险</span><span>✓ 不覆盖目标文件</span></div>
+          <div class="safety-note"><span>✓ 构建验证可选</span><span>✓ 不覆盖目标文件</span></div>
         </div>
         <button class="primary" id="convert" disabled><strong>开始转换</strong><small id="convert-caption">请先完成资源、工程和输出配置</small></button>
       </section>
@@ -234,13 +246,40 @@ app.innerHTML = `
           <div class="status muted" id="setup-status" role="status" aria-live="polite">
             <strong>等待检测 Keil TI 环境</strong><span>自动查找 SDK、Keil 与 SysConfig 后即可一键配置。</span>
           </div>
-          <div class="safety-note"><span>✓ 修改前自动备份</span><span>✓ 不覆盖其他 Keil Tools</span><span>✓ Pack 由用户手动安装</span></div>
+          <div class="safety-note"><span>✓ 自动备份</span><span>✓ 不覆盖其他 Keil Tools</span></div>
         </div>
         <button class="primary" id="configure-sysconfig" disabled><strong>一键配置 Keil TI 环境</strong><small>更新 SDK 配置并写入 Keil Tools 菜单</small></button>
       </section>
+
+      <section class="settings-panel settings-only" aria-labelledby="theme-settings-title">
+        <header class="settings-heading">
+          <div><h2 id="theme-settings-title">全局配色</h2><p>选择后立即生效并自动保存。</p></div>
+        </header>
+        <div class="theme-options" role="radiogroup" aria-label="MD3 配色预设">
+          <button type="button" data-color-theme="ti-red" role="radio" aria-checked="false">
+            <span class="theme-preview theme-red"><i></i><i></i><i></i></span>
+            <strong>TI 红</strong>
+          </button>
+          <button type="button" data-color-theme="tech-blue" role="radio" aria-checked="false">
+            <span class="theme-preview theme-blue"><i></i><i></i><i></i></span>
+            <strong>科技蓝</strong>
+          </button>
+          <button type="button" data-color-theme="teal" role="radio" aria-checked="false">
+            <span class="theme-preview theme-teal"><i></i><i></i><i></i></span>
+            <strong>青绿色</strong>
+          </button>
+          <button type="button" data-color-theme="violet" role="radio" aria-checked="false">
+            <span class="theme-preview theme-violet"><i></i><i></i><i></i></span>
+            <strong>紫色</strong>
+          </button>
+        </div>
+        <div class="settings-status muted" id="settings-status" role="status" aria-live="polite">
+          <strong>当前配色：TI 红</strong><span>设置已保存在本机。</span>
+        </div>
+      </section>
     </main>
 
-    <footer>TI工具箱 · TI MSPM0 工程转换与环境配置</footer>
+    </section>
   </div>
 `;
 
@@ -266,13 +305,12 @@ const packDownloadButton = element<HTMLButtonElement>("pack-download");
 const setupStatusView = element<HTMLElement>("setup-status");
 const modeConvertButton = element<HTMLButtonElement>("mode-convert");
 const modeSetupButton = element<HTMLButtonElement>("mode-setup");
-const heroEyebrow = element<HTMLElement>("hero-eyebrow");
+const modeSettingsButton = element<HTMLButtonElement>("mode-settings");
+const settingsStatusView = element<HTMLElement>("settings-status");
+const colorThemeButtons = [...document.querySelectorAll<HTMLButtonElement>("[data-color-theme]")];
 const heroTitle = element<HTMLElement>("hero-title");
-const heroCopy = element<HTMLElement>("hero-copy");
 const heroSideLabel = element<HTMLElement>("hero-side-label");
-const resourceNumber = element<HTMLElement>("resource-number");
 const resourceTitle = element<HTMLElement>("resource-title");
-const resourceDescription = element<HTMLElement>("resource-description");
 const packLabel = element<HTMLElement>("pack-label");
 const keilLabel = element<HTMLElement>("keil-label");
 const sysconfigLabel = element<HTMLElement>("sysconfig-label");
@@ -281,7 +319,10 @@ const aboutDialog = element<HTMLDialogElement>("about-dialog");
 let environment: EnvironmentDiscovery | null = null;
 let setupEnvironment: KeilEnvironmentDiscovery | null = null;
 let inspection: ProjectInspection | null = null;
-let appMode: AppMode = setting("mode", "convert") === "setup" ? "setup" : "convert";
+const savedMode = setting("mode", "convert");
+let appMode: AppMode = savedMode === "setup" || savedMode === "settings" ? savedMode : "convert";
+const savedColorTheme = setting("colorTheme", "ti-red");
+let colorTheme: ColorTheme = isColorTheme(savedColorTheme) ? savedColorTheme : "ti-red";
 let sourceValidatedPath = "";
 let sourceValidationFailed = false;
 let conversionProjectPath = "";
@@ -295,6 +336,7 @@ ccsInput.value = setting("ccsPath");
 keilInput.value = setting("keilPath");
 sysconfigInput.value = setting("sysconfigPath");
 toolSearchDepth.value = setting("toolSearchDepth", "2");
+applyColorTheme(colorTheme);
 
 void listen<[string, string]>("build-log", ({ payload: [operationId, chunk] }) => {
   if (operationId !== activeBuildOperation || !liveLogView) return;
@@ -304,7 +346,11 @@ void listen<[string, string]>("build-log", ({ payload: [operationId, chunk] }) =
 
 modeConvertButton.addEventListener("click", () => setMode("convert"));
 modeSetupButton.addEventListener("click", () => setMode("setup"));
-element("open-keil-setup").addEventListener("click", () => setMode("setup"));
+modeSettingsButton.addEventListener("click", () => setMode("settings"));
+colorThemeButtons.forEach((button) => button.addEventListener("click", () => {
+  const theme = button.dataset.colorTheme;
+  if (isColorTheme(theme)) applyColorTheme(theme);
+}));
 element("check-update").addEventListener("click", () => void checkForUpdates(true));
 element("show-about").addEventListener("click", () => aboutDialog.showModal());
 element("author-bilibili").addEventListener("click", () => void openExternalLink("https://space.bilibili.com/27619688"));
@@ -419,8 +465,7 @@ async function checkForUpdates(manual = false): Promise<void> {
     const update = await check();
     if (!update) {
       if (manual) {
-        const show = appMode === "setup" ? showSetupStatus : showStatus;
-        show("当前已是最新版本", "没有发现可用更新。");
+        showCurrentStatus("当前已是最新版本", "没有发现可用更新。");
       }
       return;
     }
@@ -432,8 +477,7 @@ async function checkForUpdates(manual = false): Promise<void> {
     await relaunch();
   } catch (error) {
     if (installing || manual) {
-      const show = appMode === "setup" ? showSetupStatus : showStatus;
-      show(installing ? "自动更新失败" : "检查更新失败", errorMessage(error), true);
+      showCurrentStatus(installing ? "自动更新失败" : "检查更新失败", errorMessage(error), true);
     } else {
       console.warn("检查更新失败", error);
     }
@@ -456,16 +500,19 @@ async function setMode(mode: AppMode): Promise<void> {
   document.body.dataset.mode = mode;
   modeConvertButton.setAttribute("aria-pressed", String(mode === "convert"));
   modeSetupButton.setAttribute("aria-pressed", String(mode === "setup"));
-  if (mode === "setup") {
-    heroEyebrow.textContent = "KEIL TI ENVIRONMENT SETUP";
-    heroTitle.textContent = "一键配置 Keil 的 TI 开发环境";
-    heroCopy.textContent = "无需选择工程，自动检测 MSPM0 SDK、Keil 与 SysConfig，并安全更新 Keil Tools 菜单。";
+  modeSettingsButton.setAttribute("aria-pressed", String(mode === "settings"));
+  if (mode === "settings") {
+    heroTitle.textContent = "界面设置";
+    heroSideLabel.textContent = "当前配色";
+    directionView.textContent = colorThemeLabel(colorTheme);
+    directionView.classList.add("ready");
+    showSettingsStatus(`当前配色：${colorThemeLabel(colorTheme)}`, "设置已保存在本机。");
+  } else if (mode === "setup") {
+    heroTitle.textContent = "Keil TI 环境配置";
     heroSideLabel.textContent = "当前功能";
     directionView.textContent = "Keil TI 环境配置";
     directionView.classList.add("ready");
-    resourceNumber.textContent = "01";
-    resourceTitle.textContent = "检测并配置环境";
-    resourceDescription.textContent = "Pack 手动安装；SDK、Keil 与 SysConfig 可自动检测";
+    resourceTitle.textContent = "环境路径";
     packLabel.textContent = "CMSIS Pack（手动安装，可选）";
     keilLabel.textContent = "Keil 安装目录（必需）";
     sysconfigLabel.textContent = "SysConfig 根目录（必需）";
@@ -473,17 +520,13 @@ async function setMode(mode: AppMode): Promise<void> {
     if (setupEnvironment) renderKeilEnvironment(setupEnvironment);
     else await detectKeilEnvironment();
   } else {
-    heroEyebrow.textContent = "MSPM0 PROJECT CONVERTER";
-    heroTitle.textContent = "CCS 与 Keil 工程，双向转换";
-    heroCopy.textContent = "选择开发资源与源工程，工具将基于 TI 官方模板生成目标工程。";
+    heroTitle.textContent = "工程转换";
     heroSideLabel.textContent = "当前方向";
     directionView.textContent = inspection
       ? `${kindLabel(inspection.kind)} → ${kindLabel(inspection.targetKind)}`
       : "等待识别工程";
     directionView.classList.toggle("ready", Boolean(inspection));
-    resourceNumber.textContent = "02";
-    resourceTitle.textContent = "配置开发环境";
-    resourceDescription.textContent = "CCS 与 Keil 仅在对应构建验证时需要";
+    resourceTitle.textContent = "开发环境";
     packLabel.textContent = "CMSIS Pack（CCS → Keil 必需）";
     keilLabel.textContent = "Keil 安装目录（可选）";
     sysconfigLabel.textContent = "SysConfig 根目录（可选）";
@@ -878,8 +921,7 @@ function setBusy(busy: boolean, title?: string, detail?: string): void {
     button.disabled = busy;
   });
   if (title) {
-    if (appMode === "setup") showSetupStatus(title, detail ?? "");
-    else showStatus(title, detail ?? "");
+    showCurrentStatus(title, detail ?? "");
   }
   if (!busy) {
     document.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
@@ -952,6 +994,45 @@ function showStatus(title: string, detail = "", error = false): void {
 function showSetupStatus(title: string, detail = "", error = false): void {
   setupStatusView.className = error ? "status error" : "status muted";
   setupStatusView.replaceChildren(textBlock("strong", title), textBlock("span", detail));
+}
+
+function showSettingsStatus(title: string, detail = "", error = false): void {
+  settingsStatusView.className = error ? "settings-status error" : "settings-status muted";
+  settingsStatusView.replaceChildren(textBlock("strong", title), textBlock("span", detail));
+}
+
+function showCurrentStatus(title: string, detail = "", error = false): void {
+  if (appMode === "setup") showSetupStatus(title, detail, error);
+  else if (appMode === "settings") showSettingsStatus(title, detail, error);
+  else showStatus(title, detail, error);
+}
+
+function isColorTheme(value: string | undefined): value is ColorTheme {
+  return value === "ti-red" || value === "tech-blue" || value === "teal" || value === "violet";
+}
+
+function colorThemeLabel(theme: ColorTheme): string {
+  return {
+    "ti-red": "TI 红",
+    "tech-blue": "科技蓝",
+    teal: "青绿色",
+    violet: "紫色",
+  }[theme];
+}
+
+function applyColorTheme(theme: ColorTheme): void {
+  colorTheme = theme;
+  document.body.dataset.colorTheme = theme;
+  saveSetting("colorTheme", theme);
+  colorThemeButtons.forEach((button) => {
+    const selected = button.dataset.colorTheme === theme;
+    button.setAttribute("aria-checked", String(selected));
+    button.classList.toggle("selected", selected);
+  });
+  if (appMode === "settings") {
+    directionView.textContent = colorThemeLabel(theme);
+    showSettingsStatus(`已切换为${colorThemeLabel(theme)}`, "配色已自动保存在本机。");
+  }
 }
 
 function setting(key: string, fallback = ""): string {
