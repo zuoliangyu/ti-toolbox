@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check } from "@tauri-apps/plugin-updater";
 import "./styles.css";
 
 type ProjectKind = "ccs" | "keil";
@@ -387,7 +389,28 @@ packDownloadButton.addEventListener("click", openPackDownload);
 validateSourceButton.addEventListener("click", validateSourceProject);
 ccsBuildMode.addEventListener("change", () => void discardSourceValidation());
 convertButton.addEventListener("click", convertProject);
-void setMode(appMode);
+void setMode(appMode).then(checkForUpdates);
+
+async function checkForUpdates(): Promise<void> {
+  let installing = false;
+  try {
+    const update = await check();
+    if (!update || !window.confirm(`发现新版本 ${update.version}，是否立即下载并安装？`)) return;
+    installing = true;
+    setBusy(true, `正在更新到 ${update.version}`, "下载完成后应用将自动重启…");
+    await update.downloadAndInstall();
+    await relaunch();
+  } catch (error) {
+    if (installing) {
+      const show = appMode === "setup" ? showSetupStatus : showStatus;
+      show("自动更新失败", errorMessage(error), true);
+    } else {
+      console.warn("检查更新失败", error);
+    }
+  } finally {
+    if (installing) setBusy(false);
+  }
+}
 
 async function setMode(mode: AppMode): Promise<void> {
   appMode = mode;

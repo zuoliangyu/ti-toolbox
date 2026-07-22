@@ -136,6 +136,19 @@ cargo test -p ti-toolbox-core --manifest-path src-tauri/Cargo.toml
 
 首次 Tauri 检查或构建会下载并编译较多 Rust 依赖。
 
+### GitHub 自动发布与更新
+
+`.github/workflows/windows-release.yml` 支持在 Actions 页面手动构建，也会在推送 `v*` 标签时创建 GitHub Release，发布 Windows x64 便携版 ZIP、NSIS 安装版和 Tauri 自动更新清单。
+
+发布前同步更新 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 中的版本号，然后推送对应标签：
+
+```powershell
+git tag v0.1.1
+git push origin main v0.1.1
+```
+
+仓库 Actions Secrets 需要配置 `TAURI_SIGNING_PRIVATE_KEY` 和 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。安装版会在启动时检查新版本，经用户确认后下载安装并重启；便携版不执行自替换，需要从 Release 手动下载新版。
+
 ## 已知边界
 
 - 当前目标是普通 NoRTOS DriverLib 工程，不承诺 RTOS、Bootloader 或自定义安全启动工程无损转换。
