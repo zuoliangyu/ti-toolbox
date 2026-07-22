@@ -1,7 +1,7 @@
 name: Windows 构建与发布
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   push:
     tags:
       - "v*"
