@@ -30,15 +30,20 @@ fn configure_keil_sysconfig(request: KeilSysConfigRequest) -> Result<KeilSysConf
 }
 
 #[tauri::command]
-fn open_pack_download(url: String) -> Result<(), String> {
-    if !url.starts_with("https://www.keil.arm.com/packs/") {
-        return Err("只允许打开 Keil 官方 Pack 页面".into());
+fn open_external_link(url: String) -> Result<(), String> {
+    let allowed = url.starts_with("https://www.keil.arm.com/packs/")
+        || matches!(
+            url.as_str(),
+            "https://space.bilibili.com/27619688" | "https://github.com/zuoliangyu/ti-toolbox"
+        );
+    if !allowed {
+        return Err("只允许打开预设的官方页面".into());
     }
     Command::new("rundll32.exe")
         .args(["url.dll,FileProtocolHandler", &url])
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("无法打开 Pack 下载页面：{error}"))
+        .map_err(|error| format!("无法打开页面：{error}"))
 }
 
 #[tauri::command]
@@ -92,7 +97,7 @@ pub fn run() {
             discover_environment,
             discover_keil_environment,
             configure_keil_sysconfig,
-            open_pack_download,
+            open_external_link,
             inspect_project,
             convert_project,
             validate_project_build,

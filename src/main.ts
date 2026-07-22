@@ -92,8 +92,24 @@ app.innerHTML = `
         <img src="${appIcon}" alt="" />
         <div><strong>TI工具箱</strong><span>MSPM0 开发工具集</span></div>
       </div>
-      <div class="local-note"><span></span>所有操作均在本机完成</div>
+      <div class="topbar-tools">
+        <div class="local-note"><span></span>所有操作均在本机完成</div>
+        <button class="topbar-button" id="check-update">检查更新</button>
+        <button class="topbar-button" id="show-about">关于</button>
+      </div>
     </header>
+
+    <dialog class="about-dialog" id="about-dialog" aria-labelledby="about-title">
+      <div class="about-heading">
+        <img src="${appIcon}" alt="" />
+        <div><h2 id="about-title">关于 TI工具箱</h2><p>作者：zuoliangyu</p></div>
+      </div>
+      <div class="about-links">
+        <button type="button" id="author-bilibili"><strong>哔哩哔哩主页</strong><span>space.bilibili.com/27619688</span></button>
+        <button type="button" id="project-github"><strong>GitHub 仓库</strong><span>github.com/zuoliangyu/ti-toolbox</span></button>
+      </div>
+      <form method="dialog"><button value="close">关闭</button></form>
+    </dialog>
 
     <nav class="mode-tabs" aria-label="功能切换">
       <button id="mode-convert" data-mode="convert" aria-pressed="true"><strong>工程转换</strong><small>CCS ↔ Keil</small></button>
@@ -260,6 +276,7 @@ const resourceDescription = element<HTMLElement>("resource-description");
 const packLabel = element<HTMLElement>("pack-label");
 const keilLabel = element<HTMLElement>("keil-label");
 const sysconfigLabel = element<HTMLElement>("sysconfig-label");
+const aboutDialog = element<HTMLDialogElement>("about-dialog");
 
 let environment: EnvironmentDiscovery | null = null;
 let setupEnvironment: KeilEnvironmentDiscovery | null = null;
@@ -288,6 +305,10 @@ void listen<[string, string]>("build-log", ({ payload: [operationId, chunk] }) =
 modeConvertButton.addEventListener("click", () => setMode("convert"));
 modeSetupButton.addEventListener("click", () => setMode("setup"));
 element("open-keil-setup").addEventListener("click", () => setMode("setup"));
+element("check-update").addEventListener("click", () => void checkForUpdates(true));
+element("show-about").addEventListener("click", () => aboutDialog.showModal());
+element("author-bilibili").addEventListener("click", () => void openExternalLink("https://space.bilibili.com/27619688"));
+element("project-github").addEventListener("click", () => void openExternalLink("https://github.com/zuoliangyu/ti-toolbox"));
 
 element("pick-sdk").addEventListener("click", async () => {
   const selected = await open({ directory: true, multiple: false, defaultPath: sdkInput.value || undefined });
@@ -389,26 +410,43 @@ packDownloadButton.addEventListener("click", openPackDownload);
 validateSourceButton.addEventListener("click", validateSourceProject);
 ccsBuildMode.addEventListener("change", () => void discardSourceValidation());
 convertButton.addEventListener("click", convertProject);
-void setMode(appMode).then(checkForUpdates);
+void setMode(appMode).then(() => checkForUpdates());
 
-async function checkForUpdates(): Promise<void> {
+async function checkForUpdates(manual = false): Promise<void> {
   let installing = false;
   try {
+    if (manual) setBusy(true, "正在检查更新", "正在连接 GitHub Releases…");
     const update = await check();
-    if (!update || !window.confirm(`发现新版本 ${update.version}，是否立即下载并安装？`)) return;
+    if (!update) {
+      if (manual) {
+        const show = appMode === "setup" ? showSetupStatus : showStatus;
+        show("当前已是最新版本", "没有发现可用更新。");
+      }
+      return;
+    }
+    const notes = (update.body?.trim() || "本版本未提供更新说明。").replace(/^###\s+/gm, "");
+    if (!window.confirm(`发现新版本 ${update.version}\n\n更新内容：\n${notes}\n\n是否立即下载并安装？`)) return;
     installing = true;
     setBusy(true, `正在更新到 ${update.version}`, "下载完成后应用将自动重启…");
     await update.downloadAndInstall();
     await relaunch();
   } catch (error) {
-    if (installing) {
+    if (installing || manual) {
       const show = appMode === "setup" ? showSetupStatus : showStatus;
-      show("自动更新失败", errorMessage(error), true);
+      show(installing ? "自动更新失败" : "检查更新失败", errorMessage(error), true);
     } else {
       console.warn("检查更新失败", error);
     }
   } finally {
-    if (installing) setBusy(false);
+    if (installing || manual) setBusy(false);
+  }
+}
+
+async function openExternalLink(url: string): Promise<void> {
+  try {
+    await invoke("open_external_link", { url });
+  } catch (error) {
+    window.alert(errorMessage(error));
   }
 }
 
@@ -605,7 +643,7 @@ async function openPackDownload(): Promise<void> {
     : environment?.packDownloadUrl;
   if (!url) return;
   try {
-    await invoke("open_pack_download", { url });
+    await invoke("open_external_link", { url });
   } catch (error) {
     showStatus("无法打开 Pack 下载页", errorMessage(error), true);
   }
