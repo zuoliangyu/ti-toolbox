@@ -91,7 +91,7 @@ app.innerHTML = `
     <aside class="app-sidebar">
       <div class="brand">
         <img src="${appIcon}" alt="" />
-        <div><strong>TI工具箱</strong><span>v0.1.0</span></div>
+        <div><strong>TI工具箱</strong><span>v0.2.0</span></div>
       </div>
 
       <nav class="mode-tabs" aria-label="功能切换">

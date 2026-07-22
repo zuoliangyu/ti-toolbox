@@ -3,7 +3,7 @@ members = ["converter-core"]
 
 [package]
 name = "ti-toolbox"
-version = "0.1.0"
+version = "0.2.0"
 description = "TI MSPM0 工程转换与 Keil 环境配置工具箱"
 authors = ["TI Toolbox contributors"]
 edition = "2021"
