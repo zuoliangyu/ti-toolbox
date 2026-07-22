@@ -6,6 +6,8 @@ TI工具箱是一款面向 TI MSPM0 的 Windows 桌面工具，支持 CCS 与 Ke
 
 请从 [GitHub Releases](https://github.com/zuoliangyu/ti-toolbox/releases) 下载最新版：
 
+各版本变化请查看 [更新日志](CHANGELOG.md)。
+
 - 安装版：文件名包含 `setup`，安装后可以自动检查并安装更新。
 - 便携版：文件名包含 `portable`，解压后直接运行；更新时需要重新下载新版。
 
