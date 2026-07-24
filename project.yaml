@@ -1,0 +1,13 @@
+name: TI工具箱
+authors: [左岚]
+category: Tool
+tags: [TI, MSPM0, CCS, Keil, SysConfig, 工程转换]
+status: done
+updated: 2026-07-23
+summary: 面向 TI MSPM0 的 Windows 桌面工具，支持 CCS 与 Keil 工程双向转换及 Keil TI SysConfig 环境一键配置。
+
+logo: src-tauri/icons/icon.png
+readme: README.md
+
+links:
+  github: https://github.com/zuoliangyu/ti-toolbox
